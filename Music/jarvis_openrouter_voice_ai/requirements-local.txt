@@ -1,0 +1,7 @@
+-r requirements.txt
+# Desktop-only extras (host mic / audio). Do NOT put these in requirements.txt:
+# Streamlit Community Cloud cannot build PyAudio (needs PortAudio headers).
+pyaudio>=0.2.14
+sounddevice>=0.5.0
+scipy>=1.11.0
+streamlit-mic-recorder>=0.0.8
