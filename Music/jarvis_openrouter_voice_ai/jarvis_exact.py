@@ -59,17 +59,52 @@ FAST = MODELS[1]
 
 def valid_key(k): return (k or "").strip().startswith("sk-or-v1-") and len((k or "").strip())>20
 def persist_key(k): ENV_FILE.write_text(f"OPENROUTER_API_KEY={k}\n", encoding="utf-8")
-def get_key():
-    k = st.session_state.get("openrouter_api_key","") or ""
-    if valid_key(k): return k.strip()
+_JARVIS_API_KEY: str = ""
+
+
+def _server_key_from_env_file() -> str:
+    """Read the locally-saved OpenRouter key from the git-ignored .env (server-side only)."""
     try:
-        sec = st.secrets.get("OPENROUTER_API_KEY", "")
-        if valid_key(sec): st.session_state.openrouter_api_key = sec.strip(); return sec.strip()
+        if not ENV_FILE.exists():
+            return ""
+        for _l in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            _l = _l.strip()
+            if _l.startswith("OPENROUTER_API_KEY="):
+                _v = _l.split("=", 1)[1].strip().strip('"').strip("'").strip()
+                if valid_key(_v):
+                    return _v
     except Exception:
         pass
-    e = os.getenv("OPENROUTER_API_KEY","").strip()
-    if valid_key(e): st.session_state.openrouter_api_key=e; return e
     return ""
+
+
+def get_key() -> str:
+    """Return the OpenRouter API key from SERVER-SIDE sources only.
+
+    Priority: cloud env var (Streamlit secret) -> local env file. The key is
+    never sourced from st.session_state (client-adjacent state) and is never
+    written into HTML/JS or HTTP bodies. Local saves persist to the git-ignored
+    .env on the host.
+    """
+    global _JARVIS_API_KEY
+    if _JARVIS_API_KEY:
+        return _JARVIS_API_KEY
+    _k = ""
+    try:
+        _sec = st.secrets.get("OPENROUTER_API_KEY", "")
+        if valid_key(_sec):
+            _k = _sec.strip()
+    except Exception:
+        _k = ""
+    if not _k:
+        _e = os.getenv("OPENROUTER_API_KEY", "").strip()
+        if valid_key(_e):
+            _k = _e
+    if not _k:
+        _k = _server_key_from_env_file()
+    if _k:
+        _JARVIS_API_KEY = _k
+    return _k
 
 
 _CCV2_REGISTRY: dict = {}
@@ -2247,7 +2282,8 @@ def _mobile_key_gate() -> None:
     k = st.text_input("OpenRouter API key", type="password", placeholder="sk-or-v1-...")
     if st.button("Unlock JARVIS", type="primary", width="stretch"):
         if valid_key(k):
-            st.session_state.openrouter_api_key = k.strip()
+            global _JARVIS_API_KEY
+            _JARVIS_API_KEY = k.strip()
             persist_key(k.strip())
             st.rerun()
         else:
@@ -2776,6 +2812,7 @@ def _mobile_page_memory() -> None:
 
 
 def _mobile_page_settings(api_key: str) -> None:
+    global _JARVIS_API_KEY
     _mobile_top("Settings", "settings")
     st.markdown("#### OpenRouter key")
     nk = st.text_input("API key", type="password", placeholder="sk-or-v1-...", key="m_key_input")
@@ -2783,7 +2820,7 @@ def _mobile_page_settings(api_key: str) -> None:
     with c1:
         if st.button("Save", key="m_key_save", width="stretch"):
             if valid_key(nk):
-                st.session_state.openrouter_api_key = nk.strip()
+                _JARVIS_API_KEY = nk.strip()
                 persist_key(nk.strip())
                 st.success("Saved")
                 st.rerun()
@@ -2791,7 +2828,8 @@ def _mobile_page_settings(api_key: str) -> None:
                 st.error("Invalid key")
     with c2:
         if st.button("Clear", key="m_key_clear", width="stretch"):
-            st.session_state.openrouter_api_key = ""
+            _JARVIS_API_KEY = ""
+            persist_key("")
             st.rerun()
     st.caption(f"Active: {api_key[:8]}…{api_key[-4:]}")
     st.markdown("#### Model")
@@ -3312,6 +3350,7 @@ def _render_mobile_app() -> None:
 
 
 def main():
+    global _JARVIS_API_KEY
     if "_session_start" not in st.session_state:
         st.session_state["_session_start"] = time.time()
     is_mobile = _is_mobile_view()
@@ -3359,7 +3398,9 @@ def main():
         k = st.text_input("OpenRouter API Key", type="password", placeholder="sk-or-v1-...")
         if st.button("UNLOCK JARVIS", type="primary", use_container_width=True):
             if valid_key(k):
-                st.session_state.openrouter_api_key = k.strip(); persist_key(k.strip()); st.rerun()
+                _JARVIS_API_KEY = k.strip()
+                persist_key(k.strip())
+                st.rerun()
             else:
                 st.error("Invalid key. Must start with sk-or-v1-")
         return
@@ -3387,11 +3428,16 @@ def main():
         c1, c2 = st.columns(2)
         with c1:
             if st.button("SAVE KEY", use_container_width=True):
-                if valid_key(nk): st.session_state.openrouter_api_key=nk.strip(); persist_key(nk.strip()); st.success("Saved"); st.rerun()
-        with c2:
-            if st.button("CLEAR", use_container_width=True): st.session_state.openrouter_api_key=""; st.rerun()
+                if valid_key(nk):
+                    _JARVIS_API_KEY = nk.strip()
+                    persist_key(nk.strip())
+                    st.success("Saved")
+                    st.rerun()
+            if st.button("CLEAR", use_container_width=True):
+                _JARVIS_API_KEY = ""
+                persist_key("")
+                st.rerun()
         st.caption(f"Active key: {get_key()[:8]}...{get_key()[-4:] if get_key() else ''}")
-        model = st.selectbox("Model", options=MODELS, index=0, format_func=lambda m: LABELS.get(m, m), key="model_sel")
         use_fast = st.toggle("Fast mode", value=False, key="fast_toggle")
         st.markdown("---")
         st.markdown("### 🎙️ Human Voice")
