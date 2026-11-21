@@ -30,7 +30,7 @@ API_URL = "https://openrouter.ai/api/v1/chat/completions"
 _LEARN_LOCK = threading.Lock()
 _LEARN_GEN = 0
 _GEN_LOCK = threading.Lock()
-_MAX_MEMORIES = 400
+_MAX_MEMORIES = 20000
 _MAX_MEDIA_PER_KIND = 500
 
 _KINDS = {
@@ -318,7 +318,7 @@ def wipe_all() -> None:
 # ---------------------------------------------------------------------------
 # Retrieval
 # ---------------------------------------------------------------------------
-def retrieve_memories(query: str = "", k: int = 8) -> list[dict]:
+def retrieve_memories(query: str = "", k: int = 25) -> list[dict]:
     try:
         with _db() as c:
             rows = c.execute(
@@ -367,7 +367,7 @@ def latest_summaries(limit: int = 2) -> list[dict]:
         return []
 
 
-def get_memory_context(query: str = "", max_items: int = 8, max_chars: int = 1500) -> str:
+def get_memory_context(query: str = "", max_items: int = 25, max_chars: int = 4000) -> str:
     bits: list[str] = []
     mems = retrieve_memories(query, max_items)
     if mems:
@@ -385,7 +385,7 @@ def get_memory_context(query: str = "", max_items: int = 8, max_chars: int = 150
     return out[:max_chars]
 
 
-def previous_session_context(session_start_ts: float, limit: int = 8) -> str:
+def previous_session_context(session_start_ts: float, limit: int = 30) -> str:
     turns = turns_before(session_start_ts, limit)
     if not turns:
         return ""
@@ -614,7 +614,7 @@ def maybe_learn_async(api_key: str, model: str = "google/gemma-4-31b-it", force:
     """Learn in the background. Trigger words learn immediately; otherwise every ~3 min."""
     if not api_key:
         return False
-    turns = recent_turns(14)
+    turns = recent_turns(40)
     if len(turns) < 2:
         return False
     text = _turns_text(turns)

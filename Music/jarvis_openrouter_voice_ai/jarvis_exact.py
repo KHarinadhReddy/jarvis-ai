@@ -330,9 +330,9 @@ def search_youtube(topic):
         except Exception:
             pass
     # Validate only first 2 candidates (fast <3s) — NEVER return unvalidated ID.
-    for url in candidates[:2]:
+    for url in candidates[:3]:
         try:
-            o = requests.get("https://www.youtube.com/oembed", params={"url": url, "format": "json"}, timeout=3)
+            o = requests.get("https://www.youtube.com/oembed", params={"url": url, "format": "json"}, timeout=5)
             if o.status_code == 200:
                 return url
         except Exception:
@@ -1007,7 +1007,7 @@ def call_or(api_key, model, messages, temp, toks, fast_chat=False, _has_image=Fa
         last_err = f"Empty content from {m}"
     return None, f"All models failed ({', '.join(tried)}). Last error: {last_err}"
 
-def humanize_for_speech(text: str, limit: int = 8000) -> str:
+def humanize_for_speech(text: str, limit: int = 8000, allow_non_ascii: bool = False) -> str:
     """Full read — bullet lines become separate sentences (pause each), commas kept for natural phrasing,
     no SSML (which was read as hertz/semicolon/comma). No 4-sentence cap — stories read fully."""
     import re as _re
@@ -1053,14 +1053,28 @@ def humanize_for_speech(text: str, limit: int = 8000) -> str:
         s = _re.sub(r";", ",", s)
         s = _re.sub(r":", ",", s)
         s = _re.sub(r"[\/\\|_~^\"`\(\)\[\]{}<>#@$*=+\-–—]", " ", s)
-        s = _re.sub(r"[^\x00-\x7F]", " ", s)
-        s = _re.sub(r"[^A-Za-z0-9\s,\.\?\!']", " ", s)
+        if allow_non_ascii:
+            # Keep words in any script (Telugu/Hindi/Kannada/…) when the user speaks a local language.
+            s = _re.sub(r"[^\w\s,.?!'!]+", " ", s)
+        else:
+            s = _re.sub(r"[^\x00-\x7F]", " ", s)
+            s = _re.sub(r"[^A-Za-z0-9\s,\.\?\!']", " ", s)
         s = _re.sub(r"\s+", " ", s).strip(" ,-")
         if s:
             s = s.rstrip(".?!") + "."
             cleaned.append(s)
     if not cleaned:
         return "Done."
+    # Natural breath: human-like "uh,"/"hmm," pauses between longer sentences so the voice sounds like a person.
+    if len(cleaned) > 1:
+        _breathy = []
+        for _i, _s in enumerate(cleaned):
+            _breathy.append(_s)
+            if len(_s) >= 30 and _i % 3 == 2:
+                _breathy.append("hmm,")
+            elif len(_s) >= 48 and _i % 4 == 3:
+                _breathy.append("uh,")
+        cleaned = _breathy
     out = " ".join(cleaned)
     if len(out) > limit:
         out = out[:limit].rsplit(". ", 1)[0].rstrip(".?!") + "."
@@ -1493,6 +1507,14 @@ h1,h2,h3,h4 { font-family:'Rajdhani','Segoe UI',sans-serif !important; color:#ea
 [class*="st-key-mtile_"] .stButton > button { position:absolute; inset:0; opacity:0; z-index:20;
   min-height:100% !important; border-radius:16px !important; }
 [class*="st-key-mtile_"] [data-testid="stMarkdownContainer"] { position:relative; z-index:2; }
+/* Mobile tiles: whole card is clickable and bigger */
+[class*="st-key-mtile_"] { min-height: 96px !important; position: relative !important; padding: 4px !important; }
+[class*="st-key-mtile_"] button[type="button"] { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; min-height: 96px !important; border-radius: 12px !important; font-size: 13px !important; touch-action: manipulation !important; }
+[class*="st-key-mtile_"] .mtile-corner { display: none !important; }
+[class*="st-key-mtile_"] .mtile-icon { font-size: 24px !important; margin-top: 6px !important; }
+[class*="st-key-mtile_"] .mtile-title { margin-top: 6px !important; font-size: 13px !important; }
+[class*="st-key-mtile_"] .mtile-sub { font-size: 10px !important; }
+[class*="st-key-m_chat_bar"] button { touch-action: manipulation !important; }
 .mtile-icon { font-size:22px; line-height:1; filter: drop-shadow(0 0 8px rgba(0,212,255,.5)); }
 .mtile-title { margin-top:4px; font-family:Orbitron,monospace; font-size:12px; font-weight:800; letter-spacing:1.2px; color:#e8f7ff; text-transform:uppercase; }
 .mtile-sub { margin-top:2px; font-size:10px; color:#7fa8c4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -1787,8 +1809,17 @@ export default function (component) {
     stt.textContent = 'Voice output is not supported in this browser.'
     return
   }
-  function pickVoice() {
+  function pickVoice(userLang) {
     const vs = window.speechSynthesis.getVoices() || []
+    // Prefer the Android Google voice for the user's selected language (te-IN / hi-IN / kn-IN …).
+    if (userLang) {
+      const norm = function (v) { return (v || '').toLowerCase().replace('_', '-') }
+      const exact = vs.find(function (v) { return norm(v.lang) === norm(userLang) })
+      if (exact) return exact
+      const base = userLang.split('-')[0]
+      const pref = vs.find(function (v) { return norm(v.lang).indexOf(base + '-') === 0 })
+      if (pref) return pref
+    }
     return vs.find(function (v) { return /Guy|David|Daniel|Alex|Google UK English Male/i.test((v.name || '') + ' ' + (v.voiceURI || '')) })
       || vs.find(function (v) { return /^en[-_](US|IN|GB)/i.test(v.lang || '') && /male|guy|david/i.test(v.name || '') })
       || vs.find(function (v) { return (v.lang || '').indexOf('en-US') === 0 })
@@ -1803,8 +1834,8 @@ export default function (component) {
       u.rate = 1.0
       u.pitch = 0.95
       u.volume = 1.0
-      const v = pickVoice()
-      if (v) u.voice = v
+      const v = pickVoice((data && data.lang) || (window.__jarvisHold && window.__jarvisHold.lang) || '')
+      if (v) { u.voice = v; try { u.lang = (data && data.lang) || (window.__jarvisHold && window.__jarvisHold.lang) || v.lang || '' } catch (x) {} }
       u.onstart = function () {
         stt.textContent = 'Speaking…'
         document.body.classList.add('jarvis-speaking')
@@ -1847,14 +1878,15 @@ def _mobile_tts(text: str) -> None:
     if not text or _MOBILE_TTS is None:
         return
     import hashlib as _hl
-    clean = humanize_for_speech(text, limit=700)
+    _lang = str(st.session_state.get("stt_lang") or "").strip().lower()
+    clean = humanize_for_speech(text, limit=700, allow_non_ascii=bool(_lang and not _lang.startswith("en")))
     if not clean:
         return
     tok = _hl.md5(clean.encode()).hexdigest()
     try:
         _MOBILE_TTS(
             key="m_tts",
-            data={"text": clean, "token": tok, "auto": True},
+            data={"text": clean, "token": tok, "auto": True, "lang": _lang or ""},
             height=1,
         )
     except Exception:
@@ -1960,6 +1992,27 @@ def _mobile_boot() -> None:
 
 _MOBILE_PWA_JS = r"""
 export default function (component) {
+  const { data, setTriggerValue } = component
+  const G = window.__jarvisPWA || (window.__jarvisPWA = {})
+  function push(page) {
+    try {
+      const params = new URLSearchParams(window.location.search)
+      params.set('page', page)
+      window.history.pushState({ jv: page }, '', '?' + params.toString())
+    } catch (e) {}
+  }
+  if (!G.bound) {
+    G.bound = true
+    // Browser back → ask Python to open Home instead of leaving the app.
+    window.addEventListener('popstate', function () {
+      try { setTriggerValue('back', 'b' + Date.now()) } catch (e) {}
+    })
+  }
+  const page = (data && data.page) || G.first || 'home'
+  if (G.last !== page) {
+    G.last = page
+    try { push(page) } catch (e) {}
+  }
   function inject(doc) {
     try {
       if (!doc) return
@@ -2010,9 +2063,21 @@ def _mobile_pwa_mount() -> None:
     if _MOBILE_PWA is None:
         return
     try:
-        _MOBILE_PWA(key="m_pwa", data={}, height=1)
+        res = _MOBILE_PWA(
+            key="m_pwa",
+            data={"page": str(st.session_state.get("_mobile_page_sel") or "home")},
+            height=1,
+        )
     except Exception:
-        pass
+        return
+    b = getattr(res, "back", None)
+    if b and b != st.session_state.get("_back_ts"):
+        st.session_state["_back_ts"] = b
+        # Accept the URL page as "last seen" so the state override wins (deep links).
+        _qp = _qp_str("page", "").strip().lower()
+        if _qp in MOBILE_PAGES:
+            st.session_state["_qp_last_page"] = _qp
+        _mobile_nav("home")
 
 
 # --- Real-time clock (browser timezone) + smooth auto-scroll for chat ---
@@ -2082,6 +2147,7 @@ export default function (component) {
   const { data, parentElement, setTriggerValue } = component
   const btn = parentElement.querySelector('#holdmic')
   const lbl = parentElement.querySelector('#holdlbl')
+  const glow = parentElement.querySelector('#micglow')
   if (!btn) return
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition
   const G = window.__jarvisHold || (window.__jarvisHold = {})
@@ -2089,18 +2155,30 @@ export default function (component) {
   G.lang = (data && data.lang) || 'en-US'
   btn.style.opacity = supported ? '1' : '0.45'
   if (lbl) lbl.textContent = supported ? 'Hold to talk' : 'Type instead'
+  let retries = 0
   function setRec(on) {
     btn.classList.toggle('recording', on)
     try { document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
     try { window.parent.document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
     if (lbl) lbl.textContent = on ? 'Listening…' : 'Hold to talk'
+    if (glow) glow.style.display = on ? 'block' : 'none'
     if (window.__jarvisSFX) window.__jarvisSFX.play(on ? 'wake' : 'tap')
   }
+  function showGlow() {
+    if (!glow || !btn) return
+    const r = btn.getBoundingClientRect()
+    glow.style.display = 'block'
+    glow.style.left = (r.left + r.width / 2 - 110) + 'px'
+    glow.style.top = (r.top + r.height / 2 - 110) + 'px'
+  }
+  function hideGlow() { if (glow) glow.style.display = 'none' }
   function begin(e) {
     e.preventDefault()
     if (!supported) return
     if (G.rec) { try { G.rec.abort() } catch (x) {} }
     G.text = ''
+    retries = 0
+    showGlow()
     const rec = new SR()
     G.rec = rec
     rec.lang = G.lang
@@ -2115,16 +2193,26 @@ export default function (component) {
       if (lbl && G.text) lbl.textContent = '“' + G.text.slice(-34) + '”'
     }
     rec.onerror = function (err) {
-      G.active = false; setRec(false)
-      if (lbl) lbl.textContent = (err.error === 'not-allowed' || err.error === 'service-not-allowed') ? 'Allow mic access' : 'Try again'
+      G.active = false
+      setRec(false)
+      hideGlow()
+      if (lbl) {
+        if (err.error === 'not-allowed' || err.error === 'service-not-allowed') lbl.textContent = 'Allow mic access'
+        else if ((err.error === 'no-speech' || err.error === 'aborted') && retries < 2) {
+          retries++
+          lbl.textContent = 'Tap again'
+          setTimeout(begin, 250)
+        } else lbl.textContent = 'Try again — tap the mic'
+      }
     }
     rec.onend = function () {
-      G.active = false; setRec(false)
+      G.active = false
       const t = (G.text || '').trim()
       if (t) {
         try { setTriggerValue('transcript', t) } catch (x) {}
         G.text = ''
       }
+      setRec(false)
     }
     try { rec.start() } catch (x) { setRec(false) }
   }
@@ -2143,6 +2231,7 @@ export default function (component) {
   return function () {
     try { if (G.rec) G.rec.abort() } catch (e) {}
     try { window.parent.document.body.classList.remove('jarvis-listening') } catch (e) {}
+    hideGlow()
   }
 }
 """
@@ -2155,9 +2244,12 @@ try:
     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
   </button>
   <span id="holdlbl" style="font-size:9px;letter-spacing:.6px;color:#6f9ab8;white-space:nowrap;text-transform:uppercase;">Hold to talk</span>
+  <!-- Pulse ring that expands around the mic while listening (light-transparent JARVIS red) -->
+  <div id="micglow" style="display:none;position:fixed;width:220px;height:220px;border-radius:50%;pointer-events:none;z-index:6;background:radial-gradient(circle,rgba(255,85,119,.42) 0%,rgba(255,85,119,.16) 42%,rgba(255,85,119,.05) 68%,transparent 90%);box-shadow:0 0 30px rgba(255,85,119,.55),0 0 62px rgba(255,85,119,.3);animation:micglowpulse 1.1s ease-in-out infinite;"></div>
   <style>
     #holdmic.recording { background: radial-gradient(circle at 30% 25%, #ff5577, #b3002b) !important; border-color:#ff3355 !important; color:#fff !important; box-shadow:0 0 34px rgba(255,51,85,.85), inset 0 0 18px rgba(255,51,85,.5) !important; animation: holdpulse .6s ease-in-out infinite; }
     @keyframes holdpulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.07); } }
+    @keyframes micglowpulse { 0%,100% { opacity:.85; transform: translate(-50%,-50%) scale(.85); } 50% { opacity:1; transform: translate(-50%,-50%) scale(1.22); } }
   </style>
 </div>''',
         _MOBILE_HOLD_JS,
@@ -2753,17 +2845,26 @@ def _mobile_page_memory() -> None:
         if st.button("＋ Remember this", key="m_mem_add_btn", width="stretch") and newm.strip():
             mem.add_memory(newm.strip(), "fact", 4)
             st.rerun()
-        facts = mem.list_memories(limit=80)
+        facts = mem.list_memories(limit=200)
         if not facts:
             st.caption("Nothing learned yet. Talk normally — I store and update facts automatically.")
-        for f in facts[:60]:
+        else:
+            # Show the memory sections (identity / preference / goal / …)
+            secs: dict = {}
+            for f in facts:
+                k = f.get("kind", "fact") or "fact"
+                secs[k] = secs.get(k, 0) + 1
+            st.markdown('<div class="mnote">' + " · ".join(f"{k}: {v}" for k, v in sorted(secs.items())) + "</div>", unsafe_allow_html=True)
+        for f in facts[:80]:
             c1, c2 = st.columns([5, 1])
             with c1:
-                st.markdown(f'<div class="mrow"><span>{f.get("text", "")}</span></div>', unsafe_allow_html=True)
+                st.markdown(f'<div class="mrow"><span>{f.get("text", "")[:220]}</span></div>', unsafe_allow_html=True)
             with c2:
                 if st.button("✕", key=f"mdel_{f['id']}", help="Forget"):
                     mem.delete_memory(int(f["id"]))
                     st.rerun()
+        if len(facts) > 80:
+            st.caption(f"Showing 80 of {len(facts)} — the memory store is large and grows automatically.")
         if facts and st.button("Clear all facts", key="m_mem_clear_facts", width="stretch"):
             mem.clear_memories()
             st.rerun()
@@ -2844,7 +2945,7 @@ def _mobile_page_settings(api_key: str) -> None:
     st.toggle("Auto-learn from conversations", value=bool(st.session_state.get("m_autolearn", True)), key="m_autolearn")
     st.toggle("HUD sound effects", value=bool(st.session_state.get("m_sfx", True)), key="m_sfx")
     st.slider("HUD volume", 0.0, 1.0, float(st.session_state.get("m_sfx_vol", 0.22)), 0.02, key="m_sfx_vol")
-    st.selectbox("Speech recognition language", ["en-US", "en-IN", "en-GB"], index=0, key="stt_lang")
+    st.selectbox("Speech recognition language", ["en-US", "en-IN", "en-GB", "te-IN", "hi-IN", "kn-IN", "mr-IN", "ta-IN", "ml-IN", "bn-IN", "gu-IN", "pa-IN", "en-AU", "en-ZA", "es-ES", "fr-FR", "de-DE", "pt-BR", "ja-JP"], index=0, key="stt_lang")
     st.caption("Mobile voice runs on your phone (mic + speaker). Recognition uses a fast speech service; replies use the fastest model path.")
     if st.button("Open memory & data", key="m_open_memory", width="stretch", on_click=_mobile_nav, args=("memory",)):
         pass
@@ -3138,7 +3239,7 @@ def _mobile_answer(api_key, model, use_fast, prompt):
     _dom = detect_domain(prompt)
     _pers = get_full_context(prompt, include_previous=len(hist) <= 1)
     msgs = [{"role": "system", "content": build_system_prompt(_dom, _pers, "\nMobile: keep replies under 4 sentences unless the user asks for detail.")}]
-    for h in hist[-7:-1]:
+    for h in hist[-15:-1]:
         msgs.append({"role": h["role"], "content": h["content"]})
 
     cam_bytes = st.session_state.get("camera_bytes")
@@ -3281,11 +3382,32 @@ def _mobile_generate_pending(api_key, model, use_fast) -> None:
     st.rerun()
 
 
+def _restore_chat_history() -> None:
+    """Reload the visible chat history from the persistent memory store after a page reload."""
+    if mem is None:
+        return
+    try:
+        if st.session_state.get("msgs"):
+            return
+        turns = mem.recent_turns(30)
+    except Exception:
+        turns = []
+    if not turns:
+        return
+    msgs = []
+    for t in turns:
+        if t.get("role") in ("user", "assistant"):
+            msgs.append({"role": t["role"], "content": t["text"]})
+    if msgs:
+        st.session_state["msgs"] = msgs[-30:]
+
+
 def _render_mobile_app() -> None:
     api_key = get_key()
     if not valid_key(api_key):
         _mobile_key_gate()
         return
+    _restore_chat_history()
     model = st.session_state.get("model_sel") or DEFAULT
     if model not in MODELS:
         model = DEFAULT
