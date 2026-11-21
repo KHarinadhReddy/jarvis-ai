@@ -2246,14 +2246,16 @@ export default function (component) {
     if (e) e.preventDefault()
     try { if (G.rec && G.active) G.rec.stop() } catch (x) {}
   }
-  if (!G.bound) {
-    G.bound = true
+  function bind() {
+    if (!btn || btn.__jvHoldBound) return
+    btn.__jvHoldBound = true
     btn.addEventListener('pointerdown', begin)
     btn.addEventListener('pointerup', end)
     btn.addEventListener('pointercancel', end)
     btn.addEventListener('pointerleave', end)
     btn.addEventListener('contextmenu', function (e) { e.preventDefault() })
   }
+  bind()
   return function () {
     try { if (G.rec) G.rec.abort() } catch (e) {}
     try { window.parent.document.body.classList.remove('jarvis-listening') } catch (e) {}
