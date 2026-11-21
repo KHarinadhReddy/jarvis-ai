@@ -897,11 +897,14 @@ def detect_domain(prompt: str) -> str:
     return "general"
 
 
-def build_system_prompt(domain: str, personal_context: str = "", mobile_note: str = "") -> str:
+def build_system_prompt(domain: str, personal_context: str = "", mobile_note: str = "", lang: str = "") -> str:
     base = DOMAIN_PROMPTS.get(domain, GENERAL_PROMPT)
     seg = f" {personal_context}" if personal_context else ""
     if mobile_note:
         base = base + "\n" + mobile_note
+    _l = str(lang or "").strip().lower()
+    if _l and not _l.startswith("en"):
+        base = base + f"\nLANGUAGE: The user speaks {_l}. When they ask a question in this language or with a local accent/slang, reply in the same language, same accent, and natural local slang. Do not switch to English."
     return base + seg
 
 
@@ -1086,9 +1089,29 @@ def _ssml_human(text: str) -> str:
     return text
 
 
-def synthesize_human_speech(text: str, voice: str = "en-US-GuyNeural") -> bytes:
+_VOICE_GENDER_MAP = {
+    "en-US": {"male": "en-US-AndrewNeural", "female": "en-US-EmmaNeural"},
+    "hi-IN": {"male": "hi-IN-MadhurNeural", "female": "hi-IN-SwaraNeural"},
+    "te-IN": {"male": "te-IN-MohanNeural", "female": "te-IN-ShrutiNeural"},
+    "kn-IN": {"male": "kn-IN-GaganNeural", "female": "kn-IN-SapnaNeural"},
+}
+
+
+def _apply_voice_gender(voice: str, gender: str = "auto") -> str:
+    g = str(gender or "auto").strip().lower()
+    if g not in ("male", "female"):
+        return voice
+    try:
+        lang = voice.split("-")[0] + "-" + voice.split("-")[1]
+    except Exception:
+        return voice
+    return _VOICE_GENDER_MAP.get(lang, {}).get(g) or voice
+
+
+def synthesize_human_speech(text: str, voice: str = "en-US-GuyNeural", gender: str = "auto") -> bytes:
     """Fast synthesis: 1 chunk max for <3s replies (full text stays in chat)."""
     import edge_tts
+    voice = _apply_voice_gender(voice, gender)
     human = humanize_for_speech(text, limit=800)
     async def _gen() -> bytes:
         sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", human) if s.strip()]
@@ -2156,14 +2179,6 @@ export default function (component) {
   btn.style.opacity = supported ? '1' : '0.45'
   if (lbl) lbl.textContent = supported ? 'Hold to talk' : 'Type instead'
   let retries = 0
-  function setRec(on) {
-    btn.classList.toggle('recording', on)
-    try { document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
-    try { window.parent.document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
-    if (lbl) lbl.textContent = on ? 'Listening…' : 'Hold to talk'
-    if (glow) glow.style.display = on ? 'block' : 'none'
-    if (window.__jarvisSFX) window.__jarvisSFX.play(on ? 'wake' : 'tap')
-  }
   function showGlow() {
     if (!glow || !btn) return
     const r = btn.getBoundingClientRect()
@@ -2172,13 +2187,25 @@ export default function (component) {
     glow.style.top = (r.top + r.height / 2 - 110) + 'px'
   }
   function hideGlow() { if (glow) glow.style.display = 'none' }
+  function setRec(on) {
+    btn.classList.toggle('recording', on)
+    try { document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
+    try { window.parent.document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
+    if (on) { if (lbl) lbl.textContent = 'Listening…' } else if (lbl) lbl.textContent = 'Hold to talk'
+    if (glow) glow.style.display = on ? 'block' : 'none'
+    if (window.__jarvisSFX) window.__jarvisSFX.play(on ? 'wake' : 'tap')
+  }
   function begin(e) {
     e.preventDefault()
-    if (!supported) return
+    showGlow()                        // Red pulse shows IMMEDIATELY on press
+    if (!supported) {
+      if (lbl) lbl.textContent = 'Type instead'
+      setTimeout(function () { if (!G.active) hideGlow() }, 1500)
+      return
+    }
     if (G.rec) { try { G.rec.abort() } catch (x) {} }
     G.text = ''
     retries = 0
-    showGlow()
     const rec = new SR()
     G.rec = rec
     rec.lang = G.lang
@@ -2195,7 +2222,6 @@ export default function (component) {
     rec.onerror = function (err) {
       G.active = false
       setRec(false)
-      hideGlow()
       if (lbl) {
         if (err.error === 'not-allowed' || err.error === 'service-not-allowed') lbl.textContent = 'Allow mic access'
         else if ((err.error === 'no-speech' || err.error === 'aborted') && retries < 2) {
@@ -2208,13 +2234,13 @@ export default function (component) {
     rec.onend = function () {
       G.active = false
       const t = (G.text || '').trim()
-      if (t) {
-        try { setTriggerValue('transcript', t) } catch (x) {}
-        G.text = ''
-      }
+      if (t) { try { setTriggerValue('transcript', t) } catch (x) {} ; G.text = '' }
       setRec(false)
     }
-    try { rec.start() } catch (x) { setRec(false) }
+    try { rec.start() } catch (x) {
+      // Glow already shown; if SR never starts, clear it after a moment.
+      setTimeout(function () { if (!G.active) { hideGlow(); if (lbl) lbl.textContent = 'Hold to talk' } }, 900)
+    }
   }
   function end(e) {
     if (e) e.preventDefault()
@@ -2428,6 +2454,87 @@ def _mobile_mcard(col, icon: str, title: str, subtitle: str, page: str, key: str
             )
 
 
+_MOBILE_TILES_HTML = '''<div id="tilegrid" class="m_home_grid" style="visibility:hidden;">
+  <button class="mtile" id="tile_chat" type="button"><span class="mtile-icon">💬</span><span class="mtile-title">CHAT · VOICE</span><span id="sub_chat" class="mtile-sub">Hold mic or type</span></button>
+  <button class="mtile" id="tile_camera" type="button"><span class="mtile-icon">📷</span><span class="mtile-title">CAMERA</span><span class="mtile-sub">Scan · OCR · vision</span></button>
+  <button class="mtile" id="tile_media" type="button"><span class="mtile-icon">🎵</span><span class="mtile-title">MEDIA</span><span id="sub_media" class="mtile-sub">Song</span></button>
+  <button class="mtile" id="tile_tasks" type="button"><span class="mtile-icon">📋</span><span class="mtile-title">TASKS</span><span id="sub_tasks" class="mtile-sub">2 open</span></button>
+  <button class="mtile" id="tile_weather" type="button"><span class="mtile-icon">🌤</span><span class="mtile-title">WEATHER</span><span id="sub_weather" class="mtile-sub">24°C · Bengaluru</span></button>
+  <button class="mtile" id="tile_system" type="button"><span class="mtile-icon">🖥</span><span class="mtile-title">SYSTEM</span><span class="mtile-sub">Host CPU · RAM · disk</span></button>
+  <button class="mtile" id="tile_models" type="button"><span class="mtile-icon">🧠</span><span class="mtile-title">MODELS</span><span id="sub_models" class="mtile-sub">Gemma 4</span></button>
+  <button class="mtile" id="tile_memory" type="button"><span class="mtile-icon">🗂</span><span class="mtile-title">MEMORY</span><span id="sub_memory" class="mtile-sub">12 facts learned</span></button>
+  <button class="mtile" id="tile_settings" type="button"><span class="mtile-icon">⚙</span><span class="mtile-title">SETTINGS</span><span class="mtile-sub">Voice · sounds · key</span></button>
+  <button class="mtile" id="tile_voice" type="button"><span class="mtile-icon">🎙</span><span class="mtile-title">TAP-TO-TALK</span><span class="mtile-sub">Fallback voice page</span></button>
+</div>
+<style>
+  #tilegrid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; padding: 6px 4px 4px; margin-top: 6px; }
+  .mtile { display:flex; flex-direction:column; align-items:center; gap:6px; background:transparent; border:none; color:#e8f7ff; cursor:pointer; text-align:center; touch-action:manipulation; -webkit-tap-highlight-color:transparent; border-radius:14px; }
+  .mtile:active { background: rgba(0,212,255,.07); }
+  .mtile-icon { font-size:23px; }
+  .mtile-title { font-size:12px; font-family:Orbitron,monospace; font-weight:800; letter-spacing:1.2px; color:#e8f7ff; text-transform:uppercase; margin:0; }
+  .mtile-sub { font-size:9px; color:#7fa8c4; text-transform:none; letter-spacing:0; }
+</style>'''
+
+_MOBILE_TILES_JS = r"""
+export default function (component) {
+  const { data, parentElement, setTriggerValue } = component
+  const grid = parentElement.querySelector('#tilegrid')
+  if (!grid) return
+  const page = (data && data.page) || 'home'
+  grid.style.visibility = (page !== 'home') ? 'hidden' : ''
+  const setSub = (id, txt) => { const el = grid.querySelector('#sub_' + id); if (el && txt) el.textContent = txt }
+  if (data && data.media) setSub('media', data.media)
+  if (data && data.tasks) setSub('tasks', data.tasks)
+  if (data && data.weather) setSub('weather', data.weather)
+  if (data && data.models) setSub('models', data.models)
+  if (data && data.memory) setSub('memory', data.memory)
+  for (const b of grid.querySelectorAll('.mtile')) {
+    b.addEventListener('click', () => setTriggerValue('nav', b.id.slice('tile_'.length)))
+  }
+}
+"""
+
+try:
+    _MOBILE_TILES = _ccv2_component("jarvis_mobile_tiles", _MOBILE_TILES_HTML, _MOBILE_TILES_JS)
+except Exception:
+    _MOBILE_TILES = None
+
+
+def _mobile_tiles_mount() -> None:
+    """Mount the native tiles grid. Clicking a tile fires a trigger -> page switch."""
+    if _MOBILE_TILES is None:
+        return
+    try:
+        now_playing = str(st.session_state.get("music_title") or "—")[:24]
+        tasks = st.session_state.get("tasks") or load_tasks()
+        open_tasks = sum(1 for t in tasks if not t.get("done"))
+        w = get_weather_cached()
+        facts = 0
+        try:
+            facts = mem.memory_stats()["memories"] if mem else 0
+        except Exception:
+            facts = 0
+        res = _MOBILE_TILES(
+            key="m_tiles",
+            data={
+                "page": str(st.session_state.get("_mobile_page_sel") or "home"),
+                "media": now_playing,
+                "tasks": f"{open_tasks} open",
+                "weather": f'{w["temp"]:.0f}°C · Bengaluru',
+                "models": LABELS.get(st.session_state.get("model_sel", DEFAULT), "")[:24],
+                "memory": f"{facts} facts learned",
+            },
+            height=262,
+        )
+        nav = getattr(res, "nav", None)
+    except Exception:
+        return
+    if isinstance(nav, str) and nav in MOBILE_PAGES and nav != st.session_state.get("_tiles_nav"):
+        st.session_state["_tiles_nav"] = nav
+        st.session_state["_mobile_page_sel"] = nav
+        st.rerun()
+
+
 def _mobile_page_home() -> None:
     w = get_weather_cached()
     tasks = st.session_state.get("tasks") or load_tasks()
@@ -2441,22 +2548,25 @@ def _mobile_page_home() -> None:
         facts = 0
     st.markdown(_reactor_html(), unsafe_allow_html=True)
     st.markdown(_mobile_led_row(), unsafe_allow_html=True)
-    with st.container(key="m_home_grid"):
-        c1, c2 = st.columns(2)
-        _mobile_mcard(c1, "💬", "Chat · Voice", "Hold mic or type", "chat", "chat")
-        _mobile_mcard(c2, "📷", "Camera", "Scan · OCR · vision", "camera", "camera")
-        c1, c2 = st.columns(2)
-        _mobile_mcard(c1, "🎵", "Media", now_playing, "media", "media")
-        _mobile_mcard(c2, "📋", "Tasks", f"{open_tasks} open", "tasks", "tasks")
-        c1, c2 = st.columns(2)
-        _mobile_mcard(c1, "🌤", "Weather", f'{w["temp"]:.0f}°C · Bengaluru', "weather", "weather")
-        _mobile_mcard(c2, "🖥", "System", "Host CPU · RAM · disk", "system", "system")
-        c1, c2 = st.columns(2)
-        _mobile_mcard(c1, "🧠", "Models", LABELS.get(st.session_state.get("model_sel", DEFAULT), "")[:24], "models", "models")
-        _mobile_mcard(c2, "🗂", "Memory", f"{facts} facts learned", "memory", "memory")
-        c1, c2 = st.columns(2)
-        _mobile_mcard(c1, "⚙", "Settings", "Voice · sounds · key", "settings", "settings")
-        _mobile_mcard(c2, "🎙", "Tap-to-talk", "Fallback voice page", "voice", "voice")
+    if _MOBILE_TILES is not None:
+        _mobile_tiles_mount()
+    else:
+        with st.container(key="m_home_grid"):
+            c1, c2 = st.columns(2)
+            _mobile_mcard(c1, "💬", "Chat · Voice", "Hold mic or type", "chat", "chat")
+            _mobile_mcard(c2, "📷", "Camera", "Scan · OCR · vision", "camera", "camera")
+            c1, c2 = st.columns(2)
+            _mobile_mcard(c1, "🎵", "Media", now_playing, "media", "media")
+            _mobile_mcard(c2, "📋", "Tasks", f"{open_tasks} open", "tasks", "tasks")
+            c1, c2 = st.columns(2)
+            _mobile_mcard(c1, "🌤", "Weather", f'{w["temp"]:.0f}°C · Bengaluru', "weather", "weather")
+            _mobile_mcard(c2, "🖥", "System", "Host CPU · RAM · disk", "system", "system")
+            c1, c2 = st.columns(2)
+            _mobile_mcard(c1, "🧠", "Models", LABELS.get(st.session_state.get("model_sel", DEFAULT), "")[:24], "models", "models")
+            _mobile_mcard(c2, "🗂", "Memory", f"{facts} facts learned", "memory", "memory")
+            c1, c2 = st.columns(2)
+            _mobile_mcard(c1, "⚙", "Settings", "Voice · sounds · key", "settings", "settings")
+            _mobile_mcard(c2, "🎙", "Tap-to-talk", "Fallback voice page", "voice", "voice")
     if st.session_state.get("msgs"):
         last = next((m.get("content", "") for m in reversed(st.session_state["msgs"]) if m.get("role") == "assistant"), "")
         if last:
@@ -3238,7 +3348,7 @@ def _mobile_answer(api_key, model, use_fast, prompt):
     hist = st.session_state.get("msgs", [])
     _dom = detect_domain(prompt)
     _pers = get_full_context(prompt, include_previous=len(hist) <= 1)
-    msgs = [{"role": "system", "content": build_system_prompt(_dom, _pers, "\nMobile: keep replies under 4 sentences unless the user asks for detail.")}]
+    msgs = [{"role": "system", "content": build_system_prompt(_dom, _pers, "\nMobile: keep replies under 4 sentences unless the user asks for detail.", lang=st.session_state.get("stt_lang", "en-US"))}]
     for h in hist[-15:-1]:
         msgs.append({"role": h["role"], "content": h["content"]})
 
@@ -3568,14 +3678,23 @@ def main():
             "Voice",
             options=[
                 ("Guy — US English (male)", "en-US-GuyNeural"),
-                ("Neerja — Indian English (natural)", "en-IN-NeerjaNeural"),
+                ("Andrew — US English (natural male)", "en-US-AndrewNeural"),
+                ("Emma — US English (warm female)", "en-US-EmmaNeural"),
                 ("Aria — US English (friendly)", "en-US-AriaNeural"),
                 ("Jenny — US English (warm)", "en-US-JennyNeural"),
+                ("Neerja — Indian English (natural female)", "en-IN-NeerjaNeural"),
+                ("Hindi — हिन्दी (Swara — female)", "hi-IN-SwaraNeural"),
+                ("Hindi — हिन्दी (Madhur — male)", "hi-IN-MadhurNeural"),
+                ("Telugu — తెలుగు (Shruti — female)", "te-IN-ShrutiNeural"),
+                ("Telugu — తెలుగు (Mohan — male)", "te-IN-MohanNeural"),
+                ("Kannada — ಕನ್ನಡ (Sapna — female)", "kn-IN-SapnaNeural"),
+                ("Kannada — ಕನ್ನಡ (Gagan — male)", "kn-IN-GaganNeural"),
             ],
             format_func=lambda x: x[0],
             index=0,
             key="voice_choice",
         )[1]
+        voice_gender = st.select_slider("Voice gender", options=["Auto", "Male", "Female"], key="voice_gender")
         st.caption("Natural pacing: -5% speed, 300-350ms pauses between sentences (breathing feel). Full answer stays in chat; voice speaks a short human version.")
         if st.button("Close Settings"):
             st.session_state.active_tab = "Home"; st.rerun()
@@ -3969,7 +4088,7 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
                     _generating.add(_vk)
                     def _bg_gen(_txt=txt, _vk=_vk, _vc=voice_choice):
                         try:
-                            _ab = synthesize_human_speech(_txt, voice=_vc)
+                            _ab = synthesize_human_speech(_txt, voice=_vc, gender=st.session_state.get("voice_gender", "auto"))
                             import base64 as _b64m
                             _bg[_vk] = _b64m.b64encode(_ab).decode()
                         except Exception:
@@ -4078,7 +4197,7 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
             import concurrent.futures as _cf
             # Build msgs (trimmed history + optional camera image + web context)
             _dom_d = detect_domain(final_prompt)
-            msgs = [{"role": "system", "content": build_system_prompt(_dom_d, get_full_context(final_prompt, include_previous=len(st.session_state.msgs) <= 1))}]
+            msgs = [{"role": "system", "content": build_system_prompt(_dom_d, get_full_context(final_prompt, include_previous=len(st.session_state.msgs) <= 1), lang=st.session_state.get("stt_lang", "en-US"))}]
             for h in st.session_state.msgs[-6:]:
                 msgs.append({"role": h["role"], "content": h["content"]})
             _cam_bytes = st.session_state.get("camera_bytes")
@@ -4136,7 +4255,7 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
         eff_model = FAST if use_fast else model
         # Build msgs for AI call
         _dom_d2 = detect_domain(final_prompt)
-        msgs = [{"role": "system", "content": build_system_prompt(_dom_d2, get_full_context(final_prompt, include_previous=len(st.session_state.msgs) <= 1))}]
+        msgs = [{"role": "system", "content": build_system_prompt(_dom_d2, get_full_context(final_prompt, include_previous=len(st.session_state.msgs) <= 1), lang=st.session_state.get("stt_lang", "en-US"))}]
         for h in st.session_state.msgs[-7:-1]:  # skip the last user msg we just added
             msgs.append({"role": h["role"], "content": h["content"]})
         _cam_bytes = st.session_state.get("camera_bytes")
