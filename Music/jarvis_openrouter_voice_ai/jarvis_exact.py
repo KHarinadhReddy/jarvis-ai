@@ -897,6 +897,14 @@ def detect_domain(prompt: str) -> str:
     return "general"
 
 
+_LANG_NAMES = {
+    "te": "Telugu (తెలుగు)", "hi": "Hindi (हिन्दी)", "kn": "Kannada (ಕನ್ನಡ)",
+    "ta": "Tamil (தமிழ்)", "ml": "Malayalam (മലയാളം)", "mr": "Marathi (मराठी)",
+    "bn": "Bengali (বাংলা)", "gu": "Gujarati (ગુજરાતી)", "pa": "Punjabi (ਪੰਜਾਬੀ)",
+    "es": "Spanish", "fr": "French", "de": "German", "pt": "Portuguese", "ja": "Japanese",
+}
+
+
 def build_system_prompt(domain: str, personal_context: str = "", mobile_note: str = "", lang: str = "") -> str:
     base = DOMAIN_PROMPTS.get(domain, GENERAL_PROMPT)
     seg = f" {personal_context}" if personal_context else ""
@@ -904,7 +912,13 @@ def build_system_prompt(domain: str, personal_context: str = "", mobile_note: st
         base = base + "\n" + mobile_note
     _l = str(lang or "").strip().lower()
     if _l and not _l.startswith("en"):
-        base = base + f"\nLANGUAGE: The user speaks {_l}. When they ask a question in this language or with a local accent/slang, reply in the same language, same accent, and natural local slang. Do not switch to English."
+        _name = _LANG_NAMES.get(_lang_base(_l), _l)
+        base = base + (
+            f"\nLANGUAGE: Reply ONLY in {_name} using natural, everyday spoken {_name.split(' (')[0]} — "
+            "the same local accent and slang a native speaker uses. Never switch to English "
+            "(keep common English technical words only when there is no natural local word). "
+            "Write short sentences separated by commas and full stops so the voice sounds like a person talking, not a paragraph being read."
+        )
     return base + seg
 
 
@@ -1010,77 +1024,112 @@ def call_or(api_key, model, messages, temp, toks, fast_chat=False, _has_image=Fa
         last_err = f"Empty content from {m}"
     return None, f"All models failed ({', '.join(tried)}). Last error: {last_err}"
 
-def humanize_for_speech(text: str, limit: int = 8000, allow_non_ascii: bool = False) -> str:
-    """Full read — bullet lines become separate sentences (pause each), commas kept for natural phrasing,
-    no SSML (which was read as hertz/semicolon/comma). No 4-sentence cap — stories read fully."""
+def _script_clean(s: str) -> str:
+    """Keep letters/marks/numbers of ANY script (Indic matras are marks!) + basic punctuation."""
+    import unicodedata as _ud
+    out = []
+    for ch in s:
+        if ch.isspace() or ch in ".,?!।'":
+            out.append(ch)
+            continue
+        cat = _ud.category(ch)
+        if cat[0] in ("L", "M", "N") or cat == "Cf":
+            out.append(ch)
+        else:
+            out.append(" ")
+    return "".join(out)
+
+
+def humanize_for_speech(text: str, limit: int = 8000, allow_non_ascii: bool = None, lang: str = "") -> str:
+    """Language-aware natural speech text: strips links/domains/citations/markdown, keeps the native
+    script, and adds human pauses + native breathing fillers (hmm/umm) in the user's language."""
     import re as _re
+    base = _lang_base(lang) if lang else "en"
+    if allow_non_ascii is None:
+        allow_non_ascii = base not in ("", "en")
     t = (text or "").strip()
-    t = _re.sub(r"<[^>]+>", " ", t)
+    if not t:
+        return ""
+    # strip code, tags, media markers
     t = _re.sub(r"```.*?```", " ", t, flags=_re.DOTALL)
     t = _re.sub(r"`[^`]*`", " ", t)
-    t = _re.sub(r"\[(VIDEO|MUSIC):.*?\]", " ", t)
-    t = _re.sub(r"https?://\S+", " ", t)
-    t = _re.sub(r"www\.\S+", " ", t)
+    t = _re.sub(r"<[^>]+>", " ", t)
+    t = _re.sub(r"\[(VIDEO|MUSIC)\s*:[^\]]*\]", " ", t, flags=_re.IGNORECASE)
+    # links -> label; citations "(Title — URL)" -> title; bare domains/emails gone (never read "dot")
+    t = _re.sub(r"(?im)^\s*(?:sources?|references?|links?|citations?)\s*:.*$", " ", t)
+    t = _re.sub(r"\[([^\]]+)\]\((https?://[^)]+)\)", r"\1", t)
+    t = _re.sub(r"\(\s*(?:source|sources|link|url|citation|via)\b[^()]*\)", " ", t, flags=_re.IGNORECASE)
+    t = _re.sub(r"\(\s*([^()]*?)\s*[—–-]\s*(?:https?://|www\.)[^()]*?\)", r" \1 ", t)
+    _w_site = (_LANG_SPEECH_WORDS.get(base) or _LANG_SPEECH_WORDS["en"]).get("website", "the website")
+    t = _re.sub(r"https?://[^\s)\]>]+", " %s " % _w_site, t)
+    t = _re.sub(r"\bwww\.\S+", " %s " % _w_site, t, flags=_re.IGNORECASE)
+    t = _re.sub(r"\b[\w.+-]+@[\w-]+\.[\w.-]+\b", " ", t)
+    t = _re.sub(r"\b(?:[\w-]+\.)+(?:com|org|net|io|ai|dev|in|co|me|app|gov|edu|info|xyz|site)(?:/\S*)?\b", " %s " % _w_site, t, flags=_re.IGNORECASE)
+    t = _re.sub(r"\bdot\s+(?:com|org|net|in|io|ai|dev)\b", " %s " % _w_site, t, flags=_re.IGNORECASE)
+    # markdown tables, headings, emphasis, "Sources:"
+    t = _re.sub(r"(?m)^\s*\|?[\s:|-]{5,}\|?\s*$", " ", t)
+    t = _re.sub(r"\|", " , ", t)
     t = _re.sub(r"#{1,6}\s*", " ", t)
     t = _re.sub(r"\*\*(.*?)\*\*", r"\1", t)
     t = _re.sub(r"\*(.*?)\*", r"\1", t)
-    t = _re.sub(r"%", " percent ", t)
-    t = _re.sub(r"&", " and ", t)
-    t = _re.sub(r"°", " degrees ", t)
-    t = _re.sub(r"\b(Hz|KHz|Mhz|Ghz|kHz|MHz|GHz|khz|mhz|ghz)\b", " ", t)
-    # Bullet / line handling — each line becomes a sentence so bullet points get a pause
-    lines = []
-    for raw in t.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        line = _re.sub(r"^\s*(?:[-•*○◦▪·~]+\s*|\d+\s*[.)]\s*|\d+\s+)", "", line).strip()
-        if not line:
-            continue
-        # Ensure line ends as its own sentence -> pause after every bullet
-        if not _re.search(r"[.!?]$", line):
-            line = line.rstrip(",;:\u2014\u2013-") + "."
-        lines.append(line)
-    if lines:
-        t_joined = " ".join(lines)
-    else:
-        t_joined = t.replace("\n", " ")
-    # Now split multi-sentence lines further
-    raw_sents = [s.strip() for s in _re.split(r"(?<=[.!?])\s+", t_joined) if s.strip()]
-    if not raw_sents:
-        raw_sents = [t_joined] if t_joined else ["Done."]
+    t = _re.sub(r"(?i)\bsources?\s*:", " ", t)
+    # language-aware symbols (never English words inside an Indian-language sentence)
+    _w = _LANG_SPEECH_WORDS.get(base) or _LANG_SPEECH_WORDS["en"]
+    t = _re.sub(r"°\s*[cC]\b", " %s " % _w["degrees"], t)
+    t = _re.sub(r"°\s*[fF]\b", " %s " % _w["degrees"], t)
+    t = t.replace("%", " %s " % _w["percent"])
+    t = t.replace("°", " %s " % _w["degrees"])
+    t = _re.sub(r"\s&\s", " %s " % _w["and"], t)
+    # sentence split (supports Devanagari danda + newlines)
+    t = t.replace("\r", "\n")
+    parts = _re.split(r"(?<=[.!?।])\s+|\n+", t)
     cleaned = []
-    for s in raw_sents:
-        # Keep commas attached to words for natural pause — Edge pauses, does not say "comma" (SSML was the culprit)
-        s = _re.sub(r"\s+,", ",", s)
-        s = _re.sub(r";", ",", s)
-        s = _re.sub(r":", ",", s)
-        s = _re.sub(r"[\/\\|_~^\"`\(\)\[\]{}<>#@$*=+\-–—]", " ", s)
+    for s in parts:
+        s = (s or "").strip()
+        if not s:
+            continue
+        s = _re.sub(r"^\s*(?:[-•*○◦▪·~]+\s*|\d+\s*[.)]\s*)", "", s)
         if allow_non_ascii:
-            # Keep words in any script (Telugu/Hindi/Kannada/…) when the user speaks a local language.
-            s = _re.sub(r"[^\w\s,.?!'!]+", " ", s)
+            # Unicode categories keep Indic vowel signs (matras) intact — never mangle words.
+            s = _script_clean(s)
         else:
+            s = _re.sub(r"<[^>]+>", " ", s)
             s = _re.sub(r"[^\x00-\x7F]", " ", s)
             s = _re.sub(r"[^A-Za-z0-9\s,\.\?\!']", " ", s)
-        s = _re.sub(r"\s+", " ", s).strip(" ,-")
+        # punctuation tidy: no space before marks, no doubled or dangling marks
+        s = _re.sub(r"\s+", " ", s)
+        s = _re.sub(r"\s+([,.;:!?।])", r"\1", s)
+        s = _re.sub(r"([,.;:!?])\1+", r"\1", s)
+        s = _re.sub(r",\s*,+", ",", s)
+        s = _re.sub(r"([.!?])\s*,+", r"\1", s)
+        s = _re.sub(r",\s*([.!?])", r"\1", s)
+        s = _re.sub(r"\s+(?:at|on|in|from|via)\s*([.!?])$", r"\1", s, flags=_re.IGNORECASE)
+        s = s.strip(" ,-;:")
+        _bare = s.strip(" .,?!।").strip().lower()
+        if _bare in ("the website", "website", "the link", "link") or _bare == str(_w_site).strip().lower():
+            continue
         if s:
-            s = s.rstrip(".?!") + "."
+            if s.endswith(("?", "!")):
+                pass
+            elif s.endswith("."):
+                pass
+            else:
+                s = s.rstrip("।.?!,;:") + "."
             cleaned.append(s)
     if not cleaned:
-        return "Done."
-    # Natural breath: human-like "uh,"/"hmm," pauses between longer sentences so the voice sounds like a person.
-    if len(cleaned) > 1:
-        _breathy = []
-        for _i, _s in enumerate(cleaned):
-            _breathy.append(_s)
-            if len(_s) >= 30 and _i % 3 == 2:
-                _breathy.append("hmm,")
-            elif len(_s) >= 48 and _i % 4 == 3:
-                _breathy.append("uh,")
-        cleaned = _breathy
+        return ""
+    # human breathing: one native filler (hmm / umm / achha…) after the opening sentence
+    _fill = _LANG_FILLERS.get(base) or _LANG_FILLERS["en"]
+    import zlib as _zl
+    if len(cleaned) >= 2 and len(cleaned[0]) >= 10:
+        cleaned.insert(1, _fill[_zl.crc32(t.encode("utf-8")) % len(_fill)])
     out = " ".join(cleaned)
+    # longer answers get a thinking-style gap between the first two sentences
+    if len(cleaned) >= 4:
+        out = out.replace(". ", ". … ", 2)
+    out = _re.sub(r"\s+", " ", out)
     if len(out) > limit:
-        out = out[:limit].rsplit(". ", 1)[0].rstrip(".?!") + "."
+        out = out[:limit].rsplit(". ", 1)[0].rstrip(".?!।") + "."
     return out
 
 
@@ -1089,12 +1138,114 @@ def _ssml_human(text: str) -> str:
     return text
 
 
-_VOICE_GENDER_MAP = {
-    "en-US": {"male": "en-US-AndrewNeural", "female": "en-US-EmmaNeural"},
-    "hi-IN": {"male": "hi-IN-MadhurNeural", "female": "hi-IN-SwaraNeural"},
-    "te-IN": {"male": "te-IN-MohanNeural", "female": "te-IN-ShrutiNeural"},
-    "kn-IN": {"male": "kn-IN-GaganNeural", "female": "kn-IN-SapnaNeural"},
+_LANG_VOICES = {
+    "en-us": {"male": "en-US-BrianNeural", "female": "en-US-EmmaNeural"},
+    "en-in": {"male": "en-IN-PrabhatNeural", "female": "en-IN-NeerjaNeural"},
+    "en-gb": {"male": "en-GB-RyanNeural", "female": "en-GB-SoniaNeural"},
+    "en-au": {"male": "en-AU-WilliamMultilingualNeural", "female": "en-AU-NatashaNeural"},
+    "hi-in": {"male": "hi-IN-MadhurNeural", "female": "hi-IN-SwaraNeural"},
+    "te-in": {"male": "te-IN-MohanNeural", "female": "te-IN-ShrutiNeural"},
+    "kn-in": {"male": "kn-IN-GaganNeural", "female": "kn-IN-SapnaNeural"},
+    "ta-in": {"male": "ta-IN-ValluvarNeural", "female": "ta-IN-PallaviNeural"},
+    "ml-in": {"male": "ml-IN-MidhunNeural", "female": "ml-IN-SobhanaNeural"},
+    "mr-in": {"male": "mr-IN-ManoharNeural", "female": "mr-IN-AarohiNeural"},
+    "bn-in": {"male": "bn-IN-BashkarNeural", "female": "bn-IN-TanishaaNeural"},
+    "gu-in": {"male": "gu-IN-NiranjanNeural", "female": "gu-IN-DhwaniNeural"},
+    "es-es": {"male": "es-ES-AlvaroNeural", "female": "es-ES-ElviraNeural"},
+    "fr-fr": {"male": "fr-FR-HenriNeural", "female": "fr-FR-DeniseNeural"},
+    "de-de": {"male": "de-DE-ConradNeural", "female": "de-DE-KatjaNeural"},
+    "pt-br": {"male": "pt-BR-AntonioNeural", "female": "pt-BR-FranciscaNeural"},
+    "ja-jp": {"male": "ja-JP-KeitaNeural", "female": "ja-JP-NanamiNeural"},
 }
+# Backwards-compatible alias (keys are lowercase locales).
+_VOICE_GENDER_MAP = _LANG_VOICES
+
+_LANG_FILLERS = {
+    "hi": ["हम्म,", "उम्म,", "अच्छा,"],
+    "te": ["హమ్మ్,", "అం,", "అలాగా,"],
+    "kn": ["ಹ್ಮ್,", "ಅಂದ್ರೆ,", "ಸರಿ,"],
+    "ta": ["ம்,", "அப்படியா,"],
+    "ml": ["ഹ്മ്മ്,", "അല്ലേ,"],
+    "mr": ["हम्म,", "बरं,"],
+    "bn": ["হুম,", "আচ্ছা,"],
+    "gu": ["હમ્મ,", "ઠીક,"],
+    "en": ["hmm,", "uh,", "well,"],
+}
+
+_LANG_SPEECH_WORDS = {
+    "hi": {"percent": "प्रतिशत", "and": "और", "degrees": "डिग्री", "website": "वेबसाइट"},
+    "te": {"percent": "శాతం", "and": "మరియు", "degrees": "డిగ్రీలు", "website": "వెబ్‌సైట్"},
+    "kn": {"percent": "ಪ್ರತಿಶತ", "and": "ಮತ್ತು", "degrees": "ಡಿಗ್ರಿ", "website": "ವೆಬ್‌ಸೈಟ್"},
+    "ta": {"percent": "சதவீதம்", "and": "மற்றும்", "degrees": "டிகிரி", "website": "இணையதளம்"},
+    "ml": {"percent": "ശതമാനം", "and": "കൂടാതെ", "degrees": "ഡിഗ്രി", "website": "വെബ്സൈറ്റ്"},
+    "mr": {"percent": "टक्के", "and": "आणि", "degrees": "अंश", "website": "वेबसाइट"},
+    "bn": {"percent": "শতাংশ", "and": "এবং", "degrees": "ডিগ্রি", "website": "ওয়েবসাইট"},
+    "gu": {"percent": "ટકા", "and": "અને", "degrees": "ડિગ્રી", "website": "વેબસાઇટ"},
+    "en": {"percent": "percent", "and": "and", "degrees": "degrees", "website": "the website"},
+}
+
+
+def _lang_base(lang: str) -> str:
+    return (lang or "en-US").strip().lower().replace("_", "-").split("-")[0]
+
+
+_SCRIPT_RANGES = {
+    "te-IN": (0x0C00, 0x0C7F),
+    "hi-IN": (0x0900, 0x097F),
+    "kn-IN": (0x0C80, 0x0CFF),
+    "ta-IN": (0x0B80, 0x0BFF),
+    "ml-IN": (0x0D00, 0x0D7F),
+    "bn-IN": (0x0980, 0x09FF),
+    "gu-IN": (0x0A80, 0x0AFF),
+}
+
+
+def detect_text_lang(text: str) -> str:
+    """Detect the dominant Indic script in a reply (so the voice always matches the text)."""
+    t = text or ""
+    best, best_n = "", 0
+    for loc, (lo, hi) in _SCRIPT_RANGES.items():
+        n = sum(1 for ch in t if lo <= ord(ch) <= hi)
+        if n > best_n:
+            best, best_n = loc, n
+    return best if best_n >= 10 else ""
+
+
+def speech_lang_for(text: str, selected: str = "en-US") -> str:
+    """Language to speak in: the reply's own script wins; otherwise keep the selected language
+    (English replies under an Indian language get the Indian-English accent, not American)."""
+    sel = str(selected or "en-US").strip()
+    det = detect_text_lang(text)
+    if det:
+        return det
+    if _lang_base(sel) not in ("en", ""):
+        return "en-IN"
+    return sel or "en-US"
+
+
+def voice_for_lang(lang: str = "en-US", gender: str = "auto", selected: str = "") -> str:
+    """Pick the native neural voice for the user's speech language (accent-correct)."""
+    raw = (lang or "en-US").strip().lower().replace("_", "-")
+    base = _lang_base(raw)
+    if isinstance(selected, (tuple, list)):
+        selected = selected[1] if len(selected) > 1 else ""
+    selected = str(selected or "").strip()
+    g = str(gender or "auto").strip().lower()
+    if g not in ("male", "female"):
+        g = "female" if base in ("te", "hi", "kn", "ta", "ml", "mr", "bn", "gu") else "male"
+    table = _LANG_VOICES.get(raw)
+    if not table:
+        for _k, _vals in _LANG_VOICES.items():
+            if _k.split("-")[0] == base:
+                table = _vals
+                break
+    if base == "en" and selected and _lang_base(selected) == "en":
+        return _apply_voice_gender(selected, gender)
+    if table:
+        return table[g]
+    if selected:
+        return _apply_voice_gender(selected, gender)
+    return "en-US-GuyNeural"
 
 
 def _apply_voice_gender(voice: str, gender: str = "auto") -> str:
@@ -1102,46 +1253,69 @@ def _apply_voice_gender(voice: str, gender: str = "auto") -> str:
     if g not in ("male", "female"):
         return voice
     try:
-        lang = voice.split("-")[0] + "-" + voice.split("-")[1]
+        lang = (voice.split("-")[0] + "-" + voice.split("-")[1]).lower()
     except Exception:
         return voice
     return _VOICE_GENDER_MAP.get(lang, {}).get(g) or voice
 
 
-def synthesize_human_speech(text: str, voice: str = "en-US-GuyNeural", gender: str = "auto") -> bytes:
-    """Fast synthesis: 1 chunk max for <3s replies (full text stays in chat)."""
+def _fallback_voice(voice: str, lang: str = "") -> str:
+    """Known-good voice for the language, used when a selected voice returns no audio.
+    Prefers the opposite-gender native voice so a failed voice still gets a retry."""
+    raw = (lang or voice or "").strip().lower().replace("_", "-")
+    table = _LANG_VOICES.get(raw) or {}
+    if not table:
+        for _k, _vals in _LANG_VOICES.items():
+            if _k.split("-")[0] == _lang_base(raw):
+                table = _vals
+                break
+    cand = ""
+    if table:
+        if voice == table.get("female"):
+            cand = table.get("male") or ""
+        else:
+            cand = table.get("female") or table.get("male") or ""
+    if not cand:
+        cand = "en-US-GuyNeural"
+    return cand
+
+
+def synthesize_human_speech(text: str, voice: str = "en-US-GuyNeural", gender: str = "auto", lang: str = "") -> bytes:
+    """Natural neural speech: native-language voice, human pacing (-10% Indic / -6% English),
+    gentle thinking pauses, and native breathing fillers — never robotic or English-accented."""
     import edge_tts
     voice = _apply_voice_gender(voice, gender)
-    human = humanize_for_speech(text, limit=800)
-    async def _gen() -> bytes:
-        sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", human) if s.strip()]
-        chunks, cur = [], ""
-        for s in sents:
-            s = s if s.endswith((".", "?", "!")) else s + "."
-            if len(cur) + len(s) + 1 > 800 and cur:
-                chunks.append(cur)
-                cur = s
-            else:
-                cur = (cur + " " + s).strip() if cur else s
-        if cur:
-            chunks.append(cur)
-        chunks = chunks[:2]
-        if not chunks:
-            chunks = [human]
-        chunks = chunks[:1]
-        parts = []
-        for chunk in chunks:
-            comm = edge_tts.Communicate(text=chunk, voice=voice, rate="-5%")
+    base = (lang or voice.split("-")[0]).strip().lower().split("-")[0]
+    human = humanize_for_speech(text, limit=700, lang=(lang or voice))
+    if not human:
+        return b""
+    rate = "-10%" if base in ("hi", "te", "kn", "ta", "ml", "mr", "bn", "gu") else "-6%"
+    _err = {"type": ""}
+
+    def _once(v: str, timeout: float = 12) -> bytes:
+        async def _gen() -> bytes:
+            comm = edge_tts.Communicate(text=human, voice=v, rate=rate)
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
                 path = tmp.name
             try:
-                await comm.save(path)
-                parts.append(Path(path).read_bytes())
+                await asyncio.wait_for(comm.save(path), timeout)
+                return Path(path).read_bytes()
             finally:
                 try: os.unlink(path)
                 except OSError: pass
-        return b"".join(parts)
-    return asyncio.run(_gen())
+        try:
+            return asyncio.run(_gen())
+        except Exception as e:
+            _err["type"] = type(e).__name__
+            return b""
+
+    data = _once(voice, 9)
+    if not data:
+        # A voice can intermittently return no audio or time out — retry once with another native voice.
+        fb = _fallback_voice(voice, lang or voice)
+        if fb and fb != voice:
+            data = _once(fb, 8)
+    return data
 
 
 def voice_html(text: str, audio_b64: str | None, lang: str = "") -> str:
@@ -1167,7 +1341,11 @@ def voice_html(text: str, audio_b64: str | None, lang: str = "") -> str:
       var msg = new SpeechSynthesisUtterance(full);
       msg.rate = 0.95; msg.pitch = 0.95; msg.volume = 1.0;
       var voices = speechSynthesis.getVoices();
-      var preferred = voices.find(v => /Guy|David|Daniel|Alex|Microsoft Guy/i.test(v.name + ' ' + v.voiceURI))
+      var ul = String(ulang || 'en-US').toLowerCase().replace('_', '-');
+      var ub = ul.split('-')[0];
+      var langVoice = voices.find(function(v) {{ return String(v.lang || '').toLowerCase().replace('_', '-').split('-')[0] === ub; }});
+      var preferred = langVoice
+        || voices.find(v => /Guy|David|Daniel|Alex|Microsoft Guy/i.test(v.name + ' ' + v.voiceURI))
         || voices.find(v => /^en[-_]US/i.test(v.lang) && /male|guy|david/i.test(v.name))
         || voices.find(v => v.lang.startsWith('en-US'))
         || voices.find(v => v.lang.startsWith('en'));
@@ -1822,18 +2000,18 @@ export default function (component) {
   const { data, parentElement } = component
   const btn = parentElement.querySelector('#spk')
   const stt = parentElement.querySelector('#tst')
+  const audio = parentElement.querySelector('#spk-audio')
   if (!btn || !stt) return
   const text = (data && data.text) || ''
   const token = (data && data.token) || ''
   const auto = !!(data && data.auto)
-  if (auto) { try { parentElement.style.display = 'none' } catch (e) {} }
-  btn.style.cssText = 'width:100%;background:rgba(0,212,255,0.10);border:1px solid rgba(0,212,255,0.45);color:#bdf3ff;border-radius:12px;padding:10px 12px;font-size:14px;font-weight:700;'
-  stt.style.cssText = 'display:block;text-align:center;color:#8aa4bd;font-size:11px;margin-top:4px;'
-  if (!('speechSynthesis' in window)) {
-    btn.disabled = true
-    stt.textContent = 'Voice output is not supported in this browser.'
-    return
-  }
+  const audioB64 = (data && data.audio) || ''
+  const lang = (data && data.lang) || (window.__jarvisHold && window.__jarvisHold.lang) || 'en-US'
+  btn.style.cssText = 'background:rgba(0,212,255,0.10);border:1px solid rgba(0,212,255,0.45);color:#bdf3ff;border-radius:10px;padding:5px 10px;font-size:11px;font-weight:700;'
+  stt.style.cssText = 'display:block;color:#8aa4bd;font-size:10px;margin-top:2px;'
+  const hasSynth = ('speechSynthesis' in window)
+  if (audio && audioB64) { try { audio.src = 'data:audio/mp3;base64,' + audioB64 } catch (e) {} }
+  function hideChip() { try { parentElement.style.display = 'none' } catch (e) {} }
   function pickVoice(userLang) {
     const vs = window.speechSynthesis.getVoices() || []
     // Prefer the Android Google voice for the user's selected language (te-IN / hi-IN / kn-IN …).
@@ -1852,19 +2030,21 @@ export default function (component) {
       || null
   }
   function speak() {
-    if (!text) return
+    if (!text || !hasSynth) return
     try {
       window.speechSynthesis.cancel()
       const u = new SpeechSynthesisUtterance(text)
-      u.rate = 1.0
+      u.rate = 0.97
       u.pitch = 0.95
       u.volume = 1.0
-      const v = pickVoice((data && data.lang) || (window.__jarvisHold && window.__jarvisHold.lang) || '')
-      if (v) { u.voice = v; try { u.lang = (data && data.lang) || (window.__jarvisHold && window.__jarvisHold.lang) || v.lang || '' } catch (x) {} }
+      try { u.lang = lang || 'en-US' } catch (x) {}
+      const v = pickVoice(lang)
+      if (v) u.voice = v
       u.onstart = function () {
         stt.textContent = 'Speaking…'
         document.body.classList.add('jarvis-speaking')
         if (window.__jarvisSFX) window.__jarvisSFX.play('reply')
+        hideChip()
       }
       u.onboundary = function () {
         document.body.classList.remove('jv-tick')
@@ -1874,24 +2054,36 @@ export default function (component) {
         window.__jvTick = setTimeout(function () { document.body.classList.remove('jv-tick') }, 150)
       }
       u.onend = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking', 'jv-tick') }
-      u.onerror = function () { stt.textContent = 'Tap “Speak reply” to hear it.'; document.body.classList.remove('jarvis-speaking', 'jv-tick') }
-      try { if (window.speechSynthesis) { window.speechSynthesis.cancel(); window.speechSynthesis.resume() } } catch (e) {}
+      u.onerror = function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking', 'jv-tick') }
+      try { if (window.speechSynthesis) { window.speechSynthesis.resume() } } catch (e) {}
       window.speechSynthesis.speak(u)
     } catch (e) {
-      stt.textContent = 'Tap “Speak reply” to hear it.'
+      stt.textContent = 'Tap to hear the reply.'
     }
   }
-  btn.onclick = speak
-  try { window.__jarvisTtsSpeak = speak; window.__jarvisTtsAuto = !!auto } catch (e) {}
+  function playAudio() {
+    if (!audio || !audioB64) return false
+    try {
+      audio.onplaying = function () { stt.textContent = 'Speaking…'; document.body.classList.add('jarvis-speaking'); hideChip() }
+      audio.onended = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking') }
+      audio.onerror = function () { document.body.classList.remove('jarvis-speaking'); speak() }
+      const p = audio.play()
+      if (p && p.catch) { p.catch(function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking') }) }
+      return true
+    } catch (e) { return false }
+  }
+  function play() { if (!playAudio()) speak() }
+  btn.onclick = play
+  try { window.__jarvisTtsPlay = play; window.__jarvisTtsAuto = !!auto; window.__jarvisTtsHasAudio = !!audioB64 } catch (e) {}
   if (auto && token && window.__jarvisTtsToken !== token) {
     window.__jarvisTtsToken = token
-    setTimeout(speak, 160)
+    setTimeout(play, 120)
   }
   if (!text) window.__jarvisTtsToken = ''
   try {
-    document.addEventListener('pointerdown', function () { try { if (window.speechSynthesis) window.speechSynthesis.resume() } catch (e) {} }, true)
+    document.addEventListener('pointerdown', function () { try { if (window.__jarvisTtsHasAudio && audio && audio.paused) { var _p = audio.play(); if (_p && _p.then) _p.then(hideChip).catch(function () {}) } } catch (e) {} }, true)
     document.addEventListener('click', function () { try { if (window.speechSynthesis) window.speechSynthesis.resume() } catch (e) {} }, true)
-    window.speechSynthesis.onvoiceschanged = function () { try { if (window.__jarvisTtsToken && window.__jarvisTtsAuto) { window.__jarvisTtsSpeak && window.__jarvisTtsSpeak() } } catch (e) {} }
+    window.speechSynthesis.onvoiceschanged = function () { try { if (!window.__jarvisTtsHasAudio && window.__jarvisTtsToken && window.__jarvisTtsAuto) { window.__jarvisTtsPlay && window.__jarvisTtsPlay() } } catch (e) {} }
   } catch (e) {}
 }
 """
@@ -1899,27 +2091,49 @@ export default function (component) {
 try:
     _MOBILE_TTS = _ccv2_component(
         "jarvis_mobile_tts",
-        '''<div><button id="spk" type="button">🔊 Speak reply</button><span id="tst"></span></div>''',
+        '''<div><audio id="spk-audio" preload="auto" style="display:none"></audio><button id="spk" type="button">🔊 Voice</button><span id="tst"></span></div>''',
         _MOBILE_TTS_JS,
     )
 except Exception:
     _MOBILE_TTS = None
 
 
+_MOBILE_VOICE_CACHE: dict = {}
+_EDGE_BASES = {"en", "hi", "te", "kn", "ta", "ml", "mr", "bn", "gu", "es", "fr", "de", "pt", "ja"}
+
+
 def _mobile_tts(text: str) -> None:
+    """Speak the reply on the phone with a NATIVE neural voice (Edge) — natural accent,
+    human pauses and breathing — device TTS only as a fallback."""
     if not text or _MOBILE_TTS is None:
         return
     import hashlib as _hl
-    _lang = str(st.session_state.get("stt_lang") or "").strip().lower()
-    clean = humanize_for_speech(text, limit=700, allow_non_ascii=bool(_lang and not _lang.startswith("en")))
+    import base64 as _b64m
+    _sel = str(st.session_state.get("stt_lang") or "en-US").strip().lower()
+    _lang = speech_lang_for(text, _sel)
+    voice = voice_for_lang(_lang, st.session_state.get("voice_gender", "auto"), st.session_state.get("voice_choice"))
+    clean = humanize_for_speech(text, limit=700, lang=_lang)
     if not clean:
         return
-    tok = _hl.md5(clean.encode()).hexdigest()
+    tok = _hl.md5((clean + "|" + voice).encode()).hexdigest()
+    b64 = ""
+    if _lang_base(_lang) in _EDGE_BASES:
+        b64 = _MOBILE_VOICE_CACHE.get(tok, "")
+        if not b64:
+            try:
+                b64 = _b64m.b64encode(synthesize_human_speech(text, voice, "auto", lang=_lang)).decode()
+            except Exception:
+                b64 = ""
+            if b64:
+                _MOBILE_VOICE_CACHE[tok] = b64
+                if len(_MOBILE_VOICE_CACHE) > 60:
+                    for _k in list(_MOBILE_VOICE_CACHE)[:20]:
+                        _MOBILE_VOICE_CACHE.pop(_k, None)
     try:
         _MOBILE_TTS(
             key="m_tts",
-            data={"text": clean, "token": tok, "auto": True, "lang": _lang or ""},
-            height=1,
+            data={"text": clean, "token": tok, "auto": True, "lang": _lang or "", "audio": b64},
+            height=30,
         )
     except Exception:
         pass
@@ -3715,28 +3929,35 @@ def main():
         st.markdown("---")
         st.markdown("### 🎙️ Human Voice")
         use_voice = st.toggle("Speak every reply aloud (human voice)", value=True, key="use_voice")
+        _VOICE_OPTIONS = [
+            ("Guy — US English (male)", "en-US-GuyNeural"),
+            ("Brian — US English (natural male)", "en-US-BrianNeural"),
+            ("Emma — US English (warm female)", "en-US-EmmaNeural"),
+            ("Aria — US English (friendly)", "en-US-AriaNeural"),
+            ("Jenny — US English (warm)", "en-US-JennyNeural"),
+            ("Neerja — Indian English (natural female)", "en-IN-NeerjaNeural"),
+            ("Hindi — हिन्दी (Swara — female)", "hi-IN-SwaraNeural"),
+            ("Hindi — हिन्दी (Madhur — male)", "hi-IN-MadhurNeural"),
+            ("Telugu — తెలుగు (Shruti — female)", "te-IN-ShrutiNeural"),
+            ("Telugu — తెలుగు (Mohan — male)", "te-IN-MohanNeural"),
+            ("Kannada — ಕನ್ನಡ (Sapna — female)", "kn-IN-SapnaNeural"),
+            ("Kannada — ಕನ್ನಡ (Gagan — male)", "kn-IN-GaganNeural"),
+        ]
+        _vc_state = st.session_state.get("voice_choice")
+        if _vc_state is not None and _vc_state not in _VOICE_OPTIONS:
+            try:
+                del st.session_state["voice_choice"]
+            except Exception:
+                pass
         voice_choice = st.selectbox(
             "Voice",
-            options=[
-                ("Guy — US English (male)", "en-US-GuyNeural"),
-                ("Andrew — US English (natural male)", "en-US-AndrewNeural"),
-                ("Emma — US English (warm female)", "en-US-EmmaNeural"),
-                ("Aria — US English (friendly)", "en-US-AriaNeural"),
-                ("Jenny — US English (warm)", "en-US-JennyNeural"),
-                ("Neerja — Indian English (natural female)", "en-IN-NeerjaNeural"),
-                ("Hindi — हिन्दी (Swara — female)", "hi-IN-SwaraNeural"),
-                ("Hindi — हिन्दी (Madhur — male)", "hi-IN-MadhurNeural"),
-                ("Telugu — తెలుగు (Shruti — female)", "te-IN-ShrutiNeural"),
-                ("Telugu — తెలుగు (Mohan — male)", "te-IN-MohanNeural"),
-                ("Kannada — ಕನ್ನಡ (Sapna — female)", "kn-IN-SapnaNeural"),
-                ("Kannada — ಕನ್ನಡ (Gagan — male)", "kn-IN-GaganNeural"),
-            ],
+            options=_VOICE_OPTIONS,
             format_func=lambda x: x[0],
             index=0,
             key="voice_choice",
         )[1]
         voice_gender = st.select_slider("Voice gender", options=["Auto", "Male", "Female"], key="voice_gender")
-        st.caption("Natural pacing: -5% speed, 300-350ms pauses between sentences (breathing feel). Full answer stays in chat; voice speaks a short human version.")
+        st.caption("Native neural voice for your speech language: Telugu (Shruti/Mohan), Hindi (Swara/Madhur), Kannada (Sapna/Gagan), English (your selected voice). Human pacing, natural pauses and breathing — not a device/robotic voice.")
         if st.button("Close Settings"):
             st.session_state.active_tab = "Home"; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
@@ -4116,7 +4337,9 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
             if last_assistant:
                 txt = last_assistant.get("content", "")
                 import hashlib as _hl
-                _vk = _hl.md5((txt or "").encode()).hexdigest()
+                _say_lang = speech_lang_for(txt, str(st.session_state.get("stt_lang") or "en-US"))
+                _say_voice = voice_for_lang(_say_lang, st.session_state.get("voice_gender", "auto"), voice_choice)
+                _vk = _hl.md5(((txt or "") + "|" + _say_voice).encode()).hexdigest()
                 if "_VOICE_BG_CACHE" not in globals():
                     globals()["_VOICE_BG_CACHE"] = {}
                 if "_VOICE_GENERATING" not in globals():
@@ -4127,9 +4350,9 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
                 # Lazy TTS: render immediately with browser voice (instant), generate Edge audio in background
                 if not b64 and _vk not in _generating and txt:
                     _generating.add(_vk)
-                    def _bg_gen(_txt=txt, _vk=_vk, _vc=voice_choice):
+                    def _bg_gen(_txt=txt, _vk=_vk, _vc=_say_voice, _lg=_say_lang):
                         try:
-                            _ab = synthesize_human_speech(_txt, voice=_vc, gender=st.session_state.get("voice_gender", "auto"))
+                            _ab = synthesize_human_speech(_txt, voice=_vc, gender="auto", lang=_lg)
                             import base64 as _b64m
                             _bg[_vk] = _b64m.b64encode(_ab).decode()
                         except Exception:
@@ -4138,7 +4361,7 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
                             _generating.discard(_vk)
                     import threading as _th
                     _th.Thread(target=_bg_gen, daemon=True).start()
-                components.html(voice_html(humanize_for_speech(txt), b64, str(st.session_state.get("stt_lang") or "en-US")), height=0)
+                components.html(voice_html(humanize_for_speech(txt, lang=_say_lang), b64, _say_lang), height=0)
         if "prompt_input" not in st.session_state: st.session_state.prompt_input = ""
         with st.form("jarvis_form", clear_on_submit=True):
             c1, c2 = st.columns([5, 1])
