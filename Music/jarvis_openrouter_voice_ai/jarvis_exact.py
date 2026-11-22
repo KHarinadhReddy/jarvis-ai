@@ -1318,11 +1318,14 @@ def synthesize_human_speech(text: str, voice: str = "en-US-GuyNeural", gender: s
     return data
 
 
-def voice_html(text: str, audio_b64: str | None, lang: str = "") -> str:
-    """Direct speak — invisible, no box/buttons. Edge audio if present, else browser voice instantly."""
+def voice_html(text: str, audio_b64: str | None, lang: str = "", speak_token: str = "") -> str:
+    """Direct speak — invisible, no box/buttons. Edge audio if present, else browser voice instantly.
+    Uses a single shared player and stops any previous playback."""
     import json as _json
     safe = _json.dumps(text)
     langjson = _json.dumps(lang or "en-US")
+    b64json = _json.dumps(audio_b64 or "")
+    tokenjson = _json.dumps(speak_token or "")
     audio_tag = f'<audio id="jarvis-direct-voice" preload="auto" style="display:none;"><source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3"></audio>' if audio_b64 else ""
     has_audio = "true" if audio_b64 else "false"
     return f"""
@@ -1334,9 +1337,27 @@ def voice_html(text: str, audio_b64: str | None, lang: str = "") -> str:
   var ulang = {langjson};
   var hasAudio = {has_audio};
   var audio = document.getElementById('jarvis-direct-voice');
+  var audioB64 = {b64json};
+  var stoken = {tokenjson};
+  // GLOBAL shared player on the parent window (survives iframe remounts)
+  var W = (function(){{ try {{ if (window.parent && window.parent.document) return window.parent }} catch (e) {{}} return window }})()
+  var G = W.__jarvisTTS || (W.__jarvisTTS = {{ audio: null, token: '', playing: false, bc: null, startedAt: 0 }})
+  function stopAll() {{
+    if (G.audio) {{ try {{ G.audio.pause(); G.audio.currentTime = 0 }} catch (e) {{}} G.audio = null }}
+    if ('speechSynthesis' in window) {{ try {{ window.speechSynthesis.cancel() }} catch (e) {{}} }}
+    try {{ if (W !== window && W.speechSynthesis) W.speechSynthesis.cancel() }} catch (e) {{}}
+    G.playing = false; G.token = ''
+  }}
+  try {{
+    if (!G.bc) {{ G.bc = new W.BroadcastChannel('jarvis_tts'); G.bc.onmessage = function(e){{ if(e.data==='STOP') stopAll() }} }}
+  }} catch (e) {{}}
+  function broadcastStop() {{ try {{ if (G.bc) G.bc.postMessage('STOP') }} catch (e) {{}} }}
+  function alreadySpoken() {{ try {{ return stoken && W.sessionStorage.getItem('jv_dsp_'+stoken) === '1' }} catch (e) {{ return false }} }}
+  function markSpoken() {{ try {{ if (stoken) W.sessionStorage.setItem('jv_dsp_'+stoken, '1') }} catch (e) {{}} }}
   function browserSpeak(){{
     if(!('speechSynthesis' in window) || !full) return;
     try {{
+      stopAll()
       speechSynthesis.cancel();
       var msg = new SpeechSynthesisUtterance(full);
       msg.rate = 0.95; msg.pitch = 0.95; msg.volume = 1.0;
@@ -1354,12 +1375,25 @@ def voice_html(text: str, audio_b64: str | None, lang: str = "") -> str:
     }} catch(e) {{}}
   }}
   function tryPlay(){{
-    if(!hasAudio) {{ browserSpeak(); return; }}
-    if(!audio) {{ browserSpeak(); return; }}
+    if(!hasAudio || !audioB64) {{ browserSpeak(); return; }}
+    var target = G.audio;
+    try {{ if (W !== window && W.Audio && !target) {{ target = new W.Audio(); target.setAttribute('playsinline', '') }} }} catch (e) {{}}
+    if (!target) target = audio;
+    if (!target) {{ browserSpeak(); return; }}
+    broadcastStop()
+    stopAll()
+    G.audio = target
+    G.playing = true
+    G.startedAt = Date.now()
+    target.onended = function () {{ stopAll() }}
+    target.onerror = function () {{ stopAll(); browserSpeak() }}
+    try {{ target.src = 'data:audio/mp3;base64,' + audioB64 }} catch (e) {{}}
     var p;
-    try {{ p = audio.play(); }} catch(e) {{ browserSpeak(); return; }}
+    try {{ p = target.play(); }} catch (e) {{ browserSpeak(); return; }}
     if(p && p.catch) p.catch(function(){{ browserSpeak(); }});
   }}
+  if (alreadySpoken()) {{ return; }}
+  markSpoken();
   tryPlay();
   // Unlock on first real user gesture anywhere (no visible box)
   document.addEventListener('click', function once(){{
@@ -1955,8 +1989,11 @@ export default function (component) {
             cmd = t.slice(idx + wake.length).trim().replace(/^[\s,\.\!\?:\-]+/, '')
             if (!cmd) cmd = 'hello'
           }
-          statusEl.textContent = 'Heard: “' + cmd + '”'
+          statusEl.textContent = 'Heard: "' + cmd + '"'
           if (window.__jarvisSFX) window.__jarvisSFX.play('wake')
+          // STOP any ongoing TTS when wake word is recognized
+          try { if (window.__jarvisTTS && window.__jarvisTTS.bc) window.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
+          try { if (window.parent && window.parent.__jarvisTTS && window.parent.__jarvisTTS.bc) window.parent.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
           setTriggerValue('heard', cmd)
         } else {
           interim = t
@@ -2014,7 +2051,6 @@ export default function (component) {
   function hideChip() { try { parentElement.style.display = 'none' } catch (e) {} }
   function pickVoice(userLang) {
     const vs = window.speechSynthesis.getVoices() || []
-    // Prefer the Android Google voice for the user's selected language (te-IN / hi-IN / kn-IN …).
     if (userLang) {
       const norm = function (v) { return (v || '').toLowerCase().replace('_', '-') }
       const exact = vs.find(function (v) { return norm(v.lang) === norm(userLang) })
@@ -2029,9 +2065,46 @@ export default function (component) {
       || vs.find(function (v) { return (v.lang || '').indexOf('en') === 0 })
       || null
   }
+  // GLOBAL single player (lives on the parent window so it survives iframe remounts)
+  const W = (function () { try { if (window.parent && window.parent.document) return window.parent } catch (e) {} return window })()
+  const G = W.__jarvisTTS || (W.__jarvisTTS = { audio: null, token: '', playing: false, bc: null, startedAt: 0 })
+  function stopAll() {
+    if (G.audio) { try { G.audio.pause(); G.audio.currentTime = 0 } catch (e) {} G.audio = null }
+    if (hasSynth) { try { window.speechSynthesis.cancel() } catch (e) {} }
+    try { if (W !== window && W.speechSynthesis) W.speechSynthesis.cancel() } catch (e) {}
+    G.playing = false
+    G.token = ''
+  }
+  // BroadcastChannel for cross-iframe STOP signals (mic, send, buttons)
+  try {
+    if (!G.bc) { G.bc = new W.BroadcastChannel('jarvis_tts'); G.bc.onmessage = function(e){ if(e.data==='STOP') stopAll() } }
+  } catch (e) {}
+  function broadcastStop() { try { if (G.bc) G.bc.postMessage('STOP') } catch (e) {} }
+  function playAudio() {
+    if (!audioB64) return false
+    try {
+      stopAll()
+      let target = null
+      try { if (W !== window && W.Audio) { target = new W.Audio(); target.setAttribute('playsinline', '') } } catch (e) {}
+      if (!target) target = audio
+      if (!target) return false
+      G.audio = target
+      G.playing = true
+      G.token = token
+      G.startedAt = Date.now()
+      target.onplaying = function () { stt.textContent = 'Speaking…'; document.body.classList.add('jarvis-speaking'); hideChip() }
+      target.onended = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking'); stopAll() }
+      target.onerror = function () { document.body.classList.remove('jarvis-speaking'); stopAll(); speak() }
+      try { target.src = 'data:audio/mp3;base64,' + audioB64 } catch (e) {}
+      const p = target.play()
+      if (p && p.catch) { p.catch(function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking'); stopAll() }) }
+      return true
+    } catch (e) { return false }
+  }
   function speak() {
     if (!text || !hasSynth) return
     try {
+      stopAll()
       window.speechSynthesis.cancel()
       const u = new SpeechSynthesisUtterance(text)
       u.rate = 0.97
@@ -2053,37 +2126,33 @@ export default function (component) {
         clearTimeout(window.__jvTick)
         window.__jvTick = setTimeout(function () { document.body.classList.remove('jv-tick') }, 150)
       }
-      u.onend = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking', 'jv-tick') }
-      u.onerror = function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking', 'jv-tick') }
+      u.onend = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking', 'jv-tick'); stopAll() }
+      u.onerror = function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking', 'jv-tick'); stopAll() }
       try { if (window.speechSynthesis) { window.speechSynthesis.resume() } } catch (e) {}
       window.speechSynthesis.speak(u)
+      G.playing = true
     } catch (e) {
       stt.textContent = 'Tap to hear the reply.'
+      stopAll()
     }
   }
-  function playAudio() {
-    if (!audio || !audioB64) return false
-    try {
-      audio.onplaying = function () { stt.textContent = 'Speaking…'; document.body.classList.add('jarvis-speaking'); hideChip() }
-      audio.onended = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking') }
-      audio.onerror = function () { document.body.classList.remove('jarvis-speaking'); speak() }
-      const p = audio.play()
-      if (p && p.catch) { p.catch(function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking') }) }
-      return true
-    } catch (e) { return false }
-  }
   function play() { if (!playAudio()) speak() }
-  btn.onclick = play
+  btn.onclick = function () { broadcastStop(); play() }
   try { window.__jarvisTtsPlay = play; window.__jarvisTtsAuto = !!auto; window.__jarvisTtsHasAudio = !!audioB64 } catch (e) {}
   if (auto && token && window.__jarvisTtsToken !== token) {
     window.__jarvisTtsToken = token
-    setTimeout(play, 120)
+    setTimeout(function () { broadcastStop(); play() }, 120)
   }
   if (!text) window.__jarvisTtsToken = ''
+  // STOP on any user gesture (send, button, input) - parent doc listens and broadcasts
   try {
     document.addEventListener('pointerdown', function () { try { if (window.__jarvisTtsHasAudio && audio && audio.paused) { var _p = audio.play(); if (_p && _p.then) _p.then(hideChip).catch(function () {}) } } catch (e) {} }, true)
     document.addEventListener('click', function () { try { if (window.speechSynthesis) window.speechSynthesis.resume() } catch (e) {} }, true)
     window.speechSynthesis.onvoiceschanged = function () { try { if (!window.__jarvisTtsHasAudio && window.__jarvisTtsToken && window.__jarvisTtsAuto) { window.__jarvisTtsPlay && window.__jarvisTtsPlay() } } catch (e) {} }
+  } catch (e) {}
+  // Parent-doc STOP signal listener (from mic, send, tiles, etc.)
+  try {
+    window.addEventListener('message', function(e) { if (e.data && e.data.type === 'JARVIS_STOP_TTS') { stopAll() } })
   } catch (e) {}
 }
 """
@@ -2102,9 +2171,15 @@ _MOBILE_VOICE_CACHE: dict = {}
 _EDGE_BASES = {"en", "hi", "te", "kn", "ta", "ml", "mr", "bn", "gu", "es", "fr", "de", "pt", "ja"}
 
 
-def _mobile_tts(text: str) -> None:
-    """Speak the reply on the phone with a NATIVE neural voice (Edge) — natural accent,
-    human pauses and breathing — device TTS only as a fallback."""
+def _new_tts_id() -> str:
+    import uuid
+    return uuid.uuid4().hex
+
+
+def _mobile_tts(text: str, tts_id: str = "") -> None:
+    """Speak a reply on the phone with a NATIVE neural voice (Edge) — natural accent,
+    human pauses and breathing. Auto-plays ONLY when this message is freshly generated;
+    re-renders/reloads never replay old replies. Device TTS only as a last resort."""
     if not text or _MOBILE_TTS is None:
         return
     import hashlib as _hl
@@ -2115,24 +2190,25 @@ def _mobile_tts(text: str) -> None:
     clean = humanize_for_speech(text, limit=700, lang=_lang)
     if not clean:
         return
-    tok = _hl.md5((clean + "|" + voice).encode()).hexdigest()
-    b64 = ""
-    if _lang_base(_lang) in _EDGE_BASES:
-        b64 = _MOBILE_VOICE_CACHE.get(tok, "")
-        if not b64:
-            try:
-                b64 = _b64m.b64encode(synthesize_human_speech(text, voice, "auto", lang=_lang)).decode()
-            except Exception:
-                b64 = ""
-            if b64:
-                _MOBILE_VOICE_CACHE[tok] = b64
-                if len(_MOBILE_VOICE_CACHE) > 60:
-                    for _k in list(_MOBILE_VOICE_CACHE)[:20]:
-                        _MOBILE_VOICE_CACHE.pop(_k, None)
+    fresh = bool(tts_id) and st.session_state.get("_tts_fresh") == tts_id
+    if fresh:
+        st.session_state["_tts_fresh"] = ""
+    tok = _hl.md5((clean + "|" + voice + "|" + (tts_id or "old")).encode()).hexdigest()
+    b64 = _MOBILE_VOICE_CACHE.get(tok, "")
+    if fresh and not b64 and _lang_base(_lang) in _EDGE_BASES:
+        try:
+            b64 = _b64m.b64encode(synthesize_human_speech(text, voice, "auto", lang=_lang)).decode()
+        except Exception:
+            b64 = ""
+        if b64:
+            _MOBILE_VOICE_CACHE[tok] = b64
+            if len(_MOBILE_VOICE_CACHE) > 60:
+                for _k in list(_MOBILE_VOICE_CACHE)[:20]:
+                    _MOBILE_VOICE_CACHE.pop(_k, None)
     try:
         _MOBILE_TTS(
             key="m_tts",
-            data={"text": clean, "token": tok, "auto": True, "lang": _lang or "", "audio": b64},
+            data={"text": clean, "token": tok, "auto": fresh, "lang": _lang or "", "audio": b64},
             height=30,
         )
     except Exception:
@@ -2145,11 +2221,27 @@ export default function (component) {
   const { data } = component
   const G = window.__jarvisSFX || (window.__jarvisSFX = {})
   G.enabled = data ? data.enabled !== false : true
-  G.volume = (data && typeof data.volume === 'number') ? data.volume : 0.2
+  G.volume = (data && typeof data.volume === 'number') ? data.volume : 0.18
   function ctx() {
     if (!G.ctx) { try { G.ctx = new (window.AudioContext || window.webkitAudioContext)() } catch (e) {} }
     if (G.ctx && G.ctx.state === 'suspended') { try { G.ctx.resume() } catch (e) {} }
     return G.ctx
+  }
+  function noise(dur, start, type, gain, freq1, freq2) {
+    const c = ctx(); if (!c) return
+    try {
+      const buf = c.createBuffer(1, c.sampleRate * dur, c.sampleRate)
+      const ch = buf.getChannelData(0)
+      for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1
+      const ns = c.createBufferSource(); ns.buffer = buf
+      const bp = c.createBiquadFilter(); bp.type = type || 'bandpass'; bp.frequency.value = freq1 || 1000; bp.Q.value = 2
+      const g = c.createGain()
+      g.gain.setValueAtTime(0.0001, c.currentTime + start)
+      g.gain.linearRampToValueAtTime(gain || 0.03, c.currentTime + start + 0.01)
+      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + start + dur)
+      ns.connect(bp); bp.connect(g); g.connect(c.destination)
+      ns.start(c.currentTime + start); ns.stop(c.currentTime + start + dur + 0.02)
+    } catch (e) {}
   }
   function tone(freq, start, dur, type, gain) {
     const c = ctx(); if (!c) return
@@ -2164,22 +2256,36 @@ export default function (component) {
       o.start(c.currentTime + start); o.stop(c.currentTime + start + dur + 0.03)
     } catch (e) {}
   }
+  function sweep(f1, f2, dur, start, type, gain) {
+    const c = ctx(); if (!c) return
+    try {
+      const o = c.createOscillator(), g = c.createGain()
+      o.type = type || 'sine'
+      o.frequency.setValueAtTime(f1, c.currentTime + start)
+      o.frequency.exponentialRampToValueAtTime(f2, c.currentTime + start + dur)
+      g.gain.setValueAtTime(0.0001, c.currentTime + start)
+      g.gain.linearRampToValueAtTime(gain || 0.04, c.currentTime + start + 0.01)
+      g.gain.exponentialRampToValueAtTime(0.0001, c.currentTime + start + dur)
+      o.connect(g); g.connect(c.destination)
+      o.start(c.currentTime + start); o.stop(c.currentTime + start + dur + 0.02)
+    } catch (e) {}
+  }
   G.play = function (kind) {
     if (!G.enabled) return
     const v = G.volume
     try {
-      if (kind === 'boot') { tone(160, 0, .38, 'sine', v * .75); tone(320, .12, .42, 'triangle', v * .45); tone(640, .28, .55, 'sine', v * .32); tone(960, .46, .4, 'sine', v * .2) }
-      else if (kind === 'tap') { tone(880, 0, .045, 'square', v * .18); tone(1320, .02, .05, 'sine', v * .12) }
-      else if (kind === 'nav') { tone(1960, 0, .6, 'triangle', v * .5); tone(2940, .22, .7, 'sine', v * .34); tone(3920, .45, .8, 'sine', v * .2); tone(1560, .1, .9, 'sawtooth', v * .07) }
-      else if (kind === 'listen') { tone(1500, 0, .1, 'sine', v * .18); tone(2200, .08, .16, 'sine', v * .14) }
-      else if (kind === 'stop') { tone(1050, 0, .06, 'sine', v * .2) }
-      else if (kind === 'back') { tone(1740, 0, .5, 'triangle', v * .36); tone(2618, .32, .6, 'sine', v * .22); tone(3293, .58, .75, 'sine', v * .13) }
-      else if (kind === 'typing') { tone(1300, 0, .07, 'sine', v * .18) }
-      else if (kind === 'send') { tone(520, 0, .06, 'triangle', v * .32); tone(780, .055, .08, 'triangle', v * .26) }
-      else if (kind === 'wake') { tone(620, 0, .09, 'sine', v * .34); tone(930, .085, .13, 'sine', v * .3); tone(1240, .18, .12, 'sine', v * .18) }
-      else if (kind === 'reply') { tone(420, 0, .07, 'sine', v * .28); tone(620, .07, .11, 'sine', v * .24) }
-      else if (kind === 'error') { tone(190, 0, .16, 'sawtooth', v * .3); tone(130, .14, .22, 'sawtooth', v * .24) }
-      else if (kind === 'warp') { tone(90, 0, .5, 'sawtooth', v * .16); tone(180, .18, .5, 'sine', v * .2); tone(720, .4, .4, 'sine', v * .12) }
+      if (kind === 'boot') { tone(55, 0, .6, 'sine', v * .6); tone(110, .1, .5, 'triangle', v * .35); noise(.7, 0, 'bandpass', v * .18, 200, 8000); tone(1200, .4, .3, 'sine', v * .12); tone(2400, .55, .2, 'sine', v * .06) }
+      else if (kind === 'tap') { tone(2400, 0, .03, 'square', v * .12); tone(3200, .015, .02, 'sine', v * .06) }
+      else if (kind === 'nav') { noise(.25, 0, 'bandpass', v * .25, 900, 3200); sweep(880, 1320, .18, .08, 'sine', v * .18) }
+      else if (kind === 'listen') { sweep(800, 1800, .12, 0, 'sine', v * .16) }
+      else if (kind === 'stop') { sweep(1800, 600, .08, 0, 'sine', v * .14) }
+      else if (kind === 'back') { noise(.22, 0, 'bandpass', v * .22, 2600, 700); sweep(2600, 700, .35, .05, 'sine', v * .16) }
+      else if (kind === 'typing') { tone(1300, 0, .05, 'sine', v * .08) }
+      else if (kind === 'send') { tone(520, 0, .05, 'triangle', v * .28); tone(780, .07, .06, 'triangle', v * .2) }
+      else if (kind === 'wake') { tone(880, 0, .12, 'sine', v * .25); tone(660, .14, .18, 'sine', v * .2); tone(880, .35, .1, 'sine', v * .08) }
+      else if (kind === 'reply') { sweep(300, 700, .15, 0, 'sine', v * .18); tone(1200, .18, .08, 'sine', v * .1) }
+      else if (kind === 'error') { tone(180, 0, .2, 'sawtooth', v * .25); tone(120, .12, .25, 'sawtooth', v * .2) }
+      else if (kind === 'warp') { sweep(80, 200, .6, 0, 'sawtooth', v * .14); sweep(180, 80, .5, .2, 'sine', v * .12); tone(720, .5, .3, 'sine', v * .08) }
     } catch (e) {}
   }
   function thinkSet(on) {
@@ -2188,30 +2294,39 @@ export default function (component) {
         if (!G.thinkOsc) {
           const c = ctx(); if (c) {
             const o = c.createOscillator(), g = c.createGain()
-            o.type = 'sine'; o.frequency.value = 195
-            g.gain.value = 0.03
+            o.type = 'sine'; o.frequency.value = 160
+            g.gain.value = 0.015
             o.connect(g); g.connect(c.destination)
             o.start(); G.thinkOsc = o; G.thinkG = g
           }
         }
       } else if (G.thinkOsc) {
-        try { G.thinkG.gain.exponentialRampToValueAtTime(0.0001, ctx().currentTime + 0.15) } catch (x) {}
-        try { G.thinkOsc.stop(ctx().currentTime + 0.25) } catch (x) {}
+        try { G.thinkG.gain.exponentialRampToValueAtTime(0.0001, ctx().currentTime + 0.12) } catch (x) {}
+        try { G.thinkOsc.stop(ctx().currentTime + 0.2) } catch (x) {}
         G.thinkOsc = null; G.thinkG = null
       }
     } catch (e) {}
   }
   if (!G.bound) {
     G.bound = true
-    document.addEventListener('pointerdown', function (e) {
-      try { if (e.target && e.target.closest && e.target.closest('button')) G.play('tap') } catch (x) {}
-    }, true)
-    document.addEventListener('keydown', function (e) {
-      try { if (e.target && e.target.closest && e.target.closest('input,textarea,[contenteditable="true"],[contenteditable=""]') && e.key && e.key.length === 1) G.play('typing') } catch (x) {}
-    }, true)
+    var _docs = [document]
+    try { if (window.parent && window.parent.document && window.parent.document !== document) _docs.push(window.parent.document) } catch (e) {}
+    for (var _di = 0; _di < _docs.length; _di++) {
+      (function (_d) {
+        if (_d.__jvSfxBound) return
+        _d.__jvSfxBound = true
+        _d.addEventListener('pointerdown', function (e) {
+          try { if (e.target && e.target.closest && e.target.closest('button,[role="button"]')) G.play('tap') } catch (x) {}
+        }, true)
+        _d.addEventListener('keydown', function (e) {
+          try { if (e.target && e.target.closest && e.target.closest('input,textarea,[contenteditable="true"],[contenteditable=""]') && e.key && e.key.length === 1) G.play('typing') } catch (x) {}
+        }, true)
+      })(_docs[_di])
+    }
   }
   document.body.classList.toggle('jarvis-thinking', !!(data && data.mode === 'thinking'))
-  thinkSet(document.body.classList.contains('jarvis-thinking'))
+  try { window.parent.document.body.classList.toggle('jarvis-thinking', !!(data && data.mode === 'thinking')) } catch (e) {}
+  thinkSet(document.body.classList.contains('jarvis-thinking') || !!(data && data.mode === 'thinking'))
   if (data && data.token && G.lastToken !== data.token) {
     G.lastToken = data.token
     setTimeout(function () { G.play(data.event || 'boot') }, 120)
@@ -2358,6 +2473,22 @@ def _mobile_pwa_mount() -> None:
 _MOBILE_CLOCK_JS = r"""
 export default function (component) {
   const W = window.parent
+  // Global STOP coordination: any user interaction on parent stops TTS
+  try {
+    if (!W.__jarvisGlobalStopBound) {
+      W.__jarvisGlobalStopBound = true
+      function broadcastStop() {
+        try {
+          if (W.__jarvisTTS && W.__jarvisTTS.bc) W.__jarvisTTS.bc.postMessage('STOP')
+        } catch (e) {}
+      }
+      W.document.addEventListener('click', function(e) {
+        const t = e.target
+        if (t && (t.tagName === 'BUTTON' || t.closest('button') || t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.closest('form'))) broadcastStop()
+      }, true)
+      W.document.addEventListener('submit', broadcastStop, true)
+    }
+  } catch (e) {}
   function pad(n) { return String(n).padStart(2, '0') }
   function tick() {
     try {
@@ -2448,6 +2579,9 @@ export default function (component) {
   }
   function begin(e) {
     e.preventDefault()
+    // STOP any ongoing TTS the moment user starts speaking
+    try { if (window.__jarvisTTS && window.__jarvisTTS.bc) window.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
+    try { if (window.parent && window.parent.__jarvisTTS && window.parent.__jarvisTTS.bc) window.parent.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
     showGlow()                        // Red pulse shows IMMEDIATELY on press
     if (!supported) {
       if (lbl) lbl.textContent = 'Type instead'
@@ -2744,7 +2878,12 @@ export default function (component) {
   if (data && data.models) setSub('models', data.models)
   if (data && data.memory) setSub('memory', data.memory)
   for (const b of grid.querySelectorAll('.mtile')) {
-    b.addEventListener('click', () => { try { if (window.__jarvisSFX) window.__jarvisSFX.play('nav') } catch (e) {} setTriggerValue('nav', b.id.slice('tile_'.length)) })
+    b.addEventListener('click', () => { 
+      try { if (window.__jarvisSFX) window.__jarvisSFX.play('nav') } catch (e) {}
+      try { if (window.__jarvisTTS && window.__jarvisTTS.bc) window.__jarvisTTS.bc.postMessage('STOP') } catch (e) {}
+      try { if (window.parent && window.parent.__jarvisTTS && window.parent.__jarvisTTS.bc) window.parent.__jarvisTTS.bc.postMessage('STOP') } catch (e) {}
+      setTriggerValue('nav', b.id.slice('tile_'.length)) 
+    })
   }
 }
 """
@@ -2869,7 +3008,7 @@ def _mobile_page_chat(api_key, model, use_fast, use_voice) -> None:
     if use_voice and msgs and not st.session_state.get("_mobile_gen"):
         last_a = next((m for m in reversed(msgs) if m.get("role") == "assistant"), None)
         if last_a:
-            _mobile_tts(last_a.get("content", ""))
+            _mobile_tts(last_a.get("content", ""), last_a.get("_tts_id", ""))
 
     with st.container(key="m_chat_bar"):
         c1, c2 = st.columns([5.4, 1.5], vertical_alignment="center")
@@ -2976,7 +3115,7 @@ def _mobile_page_voice(use_voice) -> None:
     if use_voice and msgs and not st.session_state.get("_mobile_gen"):
         last_a = next((m for m in reversed(msgs) if m.get("role") == "assistant"), None)
         if last_a:
-            _mobile_tts(last_a.get("content", ""))
+            _mobile_tts(last_a.get("content", ""), last_a.get("_tts_id", ""))
 
 
 def _mobile_page_camera() -> None:
@@ -3724,7 +3863,11 @@ def _mobile_generate_pending(api_key, model, use_fast) -> None:
         reply, err, nav_to = _mobile_answer(api_key, model, use_fast, prompt)
     except Exception as e:
         reply, err = "", f"Mobile reply error: {e}"
-    st.session_state.msgs.append({"role": "assistant", "content": (reply if not err else f"⚠️ {err}")})
+    _amsg = {"role": "assistant", "content": (reply if not err else f"⚠️ {err}")}
+    if reply and not err:
+        _amsg["_tts_id"] = _new_tts_id()
+        st.session_state["_tts_fresh"] = _amsg["_tts_id"]
+    st.session_state.msgs.append(_amsg)
     st.session_state["_sfx_after"] = "error" if err else "reply"
     try:
         if mem:
@@ -3800,8 +3943,10 @@ def _render_mobile_app() -> None:
             "Tasks: " + "; ".join(_b_tasks[:6]) if _b_tasks else "No open tasks.")
         _brief = (_brief_body[:600] + " Stay safe, sir.")
         st.session_state.setdefault("msgs", [])
-        st.session_state.msgs.append({"role": "assistant", "content": _brief})
-        _mobile_tts(_brief)
+        _amsg = {"role": "assistant", "content": _brief, "_tts_id": _new_tts_id()}
+        st.session_state.msgs.append(_amsg)
+        st.session_state["_tts_fresh"] = _amsg["_tts_id"]
+        _mobile_tts(_brief, _amsg["_tts_id"])
     _mobile_header()
     boot_new = not st.session_state.get("_booted")
     if boot_new:
@@ -4339,7 +4484,11 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
                 import hashlib as _hl
                 _say_lang = speech_lang_for(txt, str(st.session_state.get("stt_lang") or "en-US"))
                 _say_voice = voice_for_lang(_say_lang, st.session_state.get("voice_gender", "auto"), voice_choice)
-                _vk = _hl.md5(((txt or "") + "|" + _say_voice).encode()).hexdigest()
+                _tts_id = last_assistant.get("_tts_id", "")
+                _fresh = bool(_tts_id) and st.session_state.get("_tts_fresh") == _tts_id
+                if _fresh:
+                    st.session_state["_tts_fresh"] = ""
+                _vk = _hl.md5(((txt or "") + "|" + _say_voice + "|" + (_tts_id or "old")).encode()).hexdigest()
                 if "_VOICE_BG_CACHE" not in globals():
                     globals()["_VOICE_BG_CACHE"] = {}
                 if "_VOICE_GENERATING" not in globals():
@@ -4348,7 +4497,7 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
                 _generating = globals()["_VOICE_GENERATING"]
                 b64 = _bg.get(_vk)
                 # Lazy TTS: render immediately with browser voice (instant), generate Edge audio in background
-                if not b64 and _vk not in _generating and txt:
+                if _fresh and not b64 and _vk not in _generating and txt:
                     _generating.add(_vk)
                     def _bg_gen(_txt=txt, _vk=_vk, _vc=_say_voice, _lg=_say_lang):
                         try:
@@ -4361,7 +4510,8 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
                             _generating.discard(_vk)
                     import threading as _th
                     _th.Thread(target=_bg_gen, daemon=True).start()
-                components.html(voice_html(humanize_for_speech(txt, lang=_say_lang), b64, _say_lang), height=0)
+                _speak_token = _hl.md5(((txt or "") + "|" + _say_voice + ("|edge" if b64 else "|browser")).encode()).hexdigest()
+                components.html(voice_html(humanize_for_speech(txt, lang=_say_lang), b64, _say_lang, _speak_token), height=0)
         if "prompt_input" not in st.session_state: st.session_state.prompt_input = ""
         with st.form("jarvis_form", clear_on_submit=True):
             c1, c2 = st.columns([5, 1])
@@ -4494,7 +4644,8 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
     _ask_txt = _JARVIS_ASK_ME["text"]
     if _ask_txt:
         _JARVIS_ASK_ME["text"] = ""
-        st.session_state.msgs.append({"role": "assistant", "content": _ask_txt})
+        st.session_state.msgs.append({"role": "assistant", "content": _ask_txt, "_tts_id": _new_tts_id()})
+        st.session_state["_tts_fresh"] = st.session_state.msgs[-1]["_tts_id"]
     if st.session_state.get("_generating_reply"):
         st.session_state._generating_reply = False
     # Handle assistant response generation (runs on next render after user msg is shown)
@@ -4601,7 +4752,9 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
             # We already have the full reply, but for streaming feel we can append it in chunks
             # For true streaming, we'd need call_or to support stream=True yield, but we have the full reply
             # So we'll simulate streaming by showing it in the next rerun
-            st.session_state.msgs.append({"role": "assistant", "content": reply})
+            _amsg = {"role": "assistant", "content": reply, "_tts_id": _new_tts_id()}
+            st.session_state.msgs.append(_amsg)
+            st.session_state["_tts_fresh"] = _amsg["_tts_id"]
             try:
                 if mem:
                     mem.log_turn("assistant", reply, "jarvis", "desktop", st.session_state.get("model_sel", ""))
