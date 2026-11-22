@@ -1144,10 +1144,11 @@ def synthesize_human_speech(text: str, voice: str = "en-US-GuyNeural", gender: s
     return asyncio.run(_gen())
 
 
-def voice_html(text: str, audio_b64: str | None) -> str:
-    """Direct speak — invisible, no box/buttons. Edge audio if present, else browser Guy voice instantly."""
+def voice_html(text: str, audio_b64: str | None, lang: str = "") -> str:
+    """Direct speak — invisible, no box/buttons. Edge audio if present, else browser voice instantly."""
     import json as _json
     safe = _json.dumps(text)
+    langjson = _json.dumps(lang or "en-US")
     audio_tag = f'<audio id="jarvis-direct-voice" preload="auto" style="display:none;"><source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3"></audio>' if audio_b64 else ""
     has_audio = "true" if audio_b64 else "false"
     return f"""
@@ -1156,6 +1157,7 @@ def voice_html(text: str, audio_b64: str | None) -> str:
 <script>
 (function(){{
   var full = {safe};
+  var ulang = {langjson};
   var hasAudio = {has_audio};
   var audio = document.getElementById('jarvis-direct-voice');
   function browserSpeak(){{
@@ -1169,7 +1171,7 @@ def voice_html(text: str, audio_b64: str | None) -> str:
         || voices.find(v => /^en[-_]US/i.test(v.lang) && /male|guy|david/i.test(v.name))
         || voices.find(v => v.lang.startsWith('en-US'))
         || voices.find(v => v.lang.startsWith('en'));
-      if(preferred) msg.voice = preferred;
+      if(preferred) {{ msg.voice = preferred; try {{ msg.lang = (ulang || preferred.lang || '') }} catch (e) {{}} }}
       speechSynthesis.speak(msg);
     }} catch(e) {{}}
   }}
@@ -1873,17 +1875,24 @@ export default function (component) {
       }
       u.onend = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking', 'jv-tick') }
       u.onerror = function () { stt.textContent = 'Tap “Speak reply” to hear it.'; document.body.classList.remove('jarvis-speaking', 'jv-tick') }
+      try { if (window.speechSynthesis) { window.speechSynthesis.cancel(); window.speechSynthesis.resume() } } catch (e) {}
       window.speechSynthesis.speak(u)
     } catch (e) {
       stt.textContent = 'Tap “Speak reply” to hear it.'
     }
   }
   btn.onclick = speak
+  try { window.__jarvisTtsSpeak = speak; window.__jarvisTtsAuto = !!auto } catch (e) {}
   if (auto && token && window.__jarvisTtsToken !== token) {
     window.__jarvisTtsToken = token
     setTimeout(speak, 160)
   }
   if (!text) window.__jarvisTtsToken = ''
+  try {
+    document.addEventListener('pointerdown', function () { try { if (window.speechSynthesis) window.speechSynthesis.resume() } catch (e) {} }, true)
+    document.addEventListener('click', function () { try { if (window.speechSynthesis) window.speechSynthesis.resume() } catch (e) {} }, true)
+    window.speechSynthesis.onvoiceschanged = function () { try { if (window.__jarvisTtsToken && window.__jarvisTtsAuto) { window.__jarvisTtsSpeak && window.__jarvisTtsSpeak() } } catch (e) {} }
+  } catch (e) {}
 }
 """
 
@@ -1947,9 +1956,10 @@ export default function (component) {
     try {
       if (kind === 'boot') { tone(160, 0, .38, 'sine', v * .75); tone(320, .12, .42, 'triangle', v * .45); tone(640, .28, .55, 'sine', v * .32); tone(960, .46, .4, 'sine', v * .2) }
       else if (kind === 'tap') { tone(880, 0, .045, 'square', v * .18); tone(1320, .02, .05, 'sine', v * .12) }
-      else if (kind === 'nav') { tone(2300, 0, .5, 'triangle', v * .45); tone(3600, .5, .55, 'sine', v * .28) }
+      else if (kind === 'nav') { tone(1960, 0, .6, 'triangle', v * .5); tone(2940, .22, .7, 'sine', v * .34); tone(3920, .45, .8, 'sine', v * .2); tone(1560, .1, .9, 'sawtooth', v * .07) }
       else if (kind === 'listen') { tone(1500, 0, .1, 'sine', v * .18); tone(2200, .08, .16, 'sine', v * .14) }
       else if (kind === 'stop') { tone(1050, 0, .06, 'sine', v * .2) }
+      else if (kind === 'back') { tone(1740, 0, .5, 'triangle', v * .36); tone(2618, .32, .6, 'sine', v * .22); tone(3293, .58, .75, 'sine', v * .13) }
       else if (kind === 'typing') { tone(1300, 0, .07, 'sine', v * .18) }
       else if (kind === 'send') { tone(520, 0, .06, 'triangle', v * .32); tone(780, .055, .08, 'triangle', v * .26) }
       else if (kind === 'wake') { tone(620, 0, .09, 'sine', v * .34); tone(930, .085, .13, 'sine', v * .3); tone(1240, .18, .12, 'sine', v * .18) }
@@ -2335,10 +2345,12 @@ def _mobile_hold_mount() -> None:
             _mobile_send(t, source="voice")
 
 
-def _mobile_nav(page: str) -> None:
+def _mobile_nav(page: str, sfx: str = "") -> None:
     """Instant client-side page switch: state only, no URL change, no extra rerun."""
     st.session_state["_mobile_page_sel"] = page
     st.session_state["_nav_ts"] = time.time()
+    if sfx:
+        st.session_state["_sfx_after"] = sfx
 
 
 def _reactor_html() -> str:
@@ -2608,7 +2620,7 @@ def _mobile_page_chat(api_key, model, use_fast, use_voice) -> None:
     with st.container(key="m_chat_head"):
         h1, h2 = st.columns([1, 5], vertical_alignment="center")
         with h1:
-            st.button("←", key="mchat_back", on_click=_mobile_nav, args=("home",), help="Back to dashboard")
+            st.button("←", key="mchat_back", on_click=_mobile_nav, args=("home", "back"), help="Back to dashboard")
         with h2:
             st.markdown('<div class="mtitle">CHAT · VOICE</div>', unsafe_allow_html=True)
 
@@ -4126,7 +4138,7 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
                             _generating.discard(_vk)
                     import threading as _th
                     _th.Thread(target=_bg_gen, daemon=True).start()
-                components.html(voice_html(humanize_for_speech(txt), b64), height=0)
+                components.html(voice_html(humanize_for_speech(txt), b64, str(st.session_state.get("stt_lang") or "en-US")), height=0)
         if "prompt_input" not in st.session_state: st.session_state.prompt_input = ""
         with st.form("jarvis_form", clear_on_submit=True):
             c1, c2 = st.columns([5, 1])
