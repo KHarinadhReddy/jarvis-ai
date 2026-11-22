@@ -1947,6 +1947,10 @@ export default function (component) {
     try {
       if (kind === 'boot') { tone(160, 0, .38, 'sine', v * .75); tone(320, .12, .42, 'triangle', v * .45); tone(640, .28, .55, 'sine', v * .32); tone(960, .46, .4, 'sine', v * .2) }
       else if (kind === 'tap') { tone(880, 0, .045, 'square', v * .18); tone(1320, .02, .05, 'sine', v * .12) }
+      else if (kind === 'nav') { tone(2300, 0, .5, 'triangle', v * .45); tone(3600, .5, .55, 'sine', v * .28) }
+      else if (kind === 'listen') { tone(1500, 0, .1, 'sine', v * .18); tone(2200, .08, .16, 'sine', v * .14) }
+      else if (kind === 'stop') { tone(1050, 0, .06, 'sine', v * .2) }
+      else if (kind === 'typing') { tone(1300, 0, .07, 'sine', v * .18) }
       else if (kind === 'send') { tone(520, 0, .06, 'triangle', v * .32); tone(780, .055, .08, 'triangle', v * .26) }
       else if (kind === 'wake') { tone(620, 0, .09, 'sine', v * .34); tone(930, .085, .13, 'sine', v * .3); tone(1240, .18, .12, 'sine', v * .18) }
       else if (kind === 'reply') { tone(420, 0, .07, 'sine', v * .28); tone(620, .07, .11, 'sine', v * .24) }
@@ -1954,13 +1958,36 @@ export default function (component) {
       else if (kind === 'warp') { tone(90, 0, .5, 'sawtooth', v * .16); tone(180, .18, .5, 'sine', v * .2); tone(720, .4, .4, 'sine', v * .12) }
     } catch (e) {}
   }
+  function thinkSet(on) {
+    try {
+      if (on) {
+        if (!G.thinkOsc) {
+          const c = ctx(); if (c) {
+            const o = c.createOscillator(), g = c.createGain()
+            o.type = 'sine'; o.frequency.value = 195
+            g.gain.value = 0.03
+            o.connect(g); g.connect(c.destination)
+            o.start(); G.thinkOsc = o; G.thinkG = g
+          }
+        }
+      } else if (G.thinkOsc) {
+        try { G.thinkG.gain.exponentialRampToValueAtTime(0.0001, ctx().currentTime + 0.15) } catch (x) {}
+        try { G.thinkOsc.stop(ctx().currentTime + 0.25) } catch (x) {}
+        G.thinkOsc = null; G.thinkG = null
+      }
+    } catch (e) {}
+  }
   if (!G.bound) {
     G.bound = true
     document.addEventListener('pointerdown', function (e) {
       try { if (e.target && e.target.closest && e.target.closest('button')) G.play('tap') } catch (x) {}
     }, true)
+    document.addEventListener('keydown', function (e) {
+      try { if (e.target && e.target.closest && e.target.closest('input,textarea,[contenteditable="true"],[contenteditable=""]') && e.key && e.key.length === 1) G.play('typing') } catch (x) {}
+    }, true)
   }
   document.body.classList.toggle('jarvis-thinking', !!(data && data.mode === 'thinking'))
+  thinkSet(document.body.classList.contains('jarvis-thinking'))
   if (data && data.token && G.lastToken !== data.token) {
     G.lastToken = data.token
     setTimeout(function () { G.play(data.event || 'boot') }, 120)
@@ -2193,7 +2220,7 @@ export default function (component) {
     try { window.parent.document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
     if (on) { if (lbl) lbl.textContent = 'Listening…' } else if (lbl) lbl.textContent = 'Hold to talk'
     if (glow) glow.style.display = on ? 'block' : 'none'
-    if (window.__jarvisSFX) window.__jarvisSFX.play(on ? 'wake' : 'tap')
+    if (window.__jarvisSFX) window.__jarvisSFX.play(on ? 'listen' : 'stop')
   }
   function begin(e) {
     e.preventDefault()
@@ -2491,7 +2518,7 @@ export default function (component) {
   if (data && data.models) setSub('models', data.models)
   if (data && data.memory) setSub('memory', data.memory)
   for (const b of grid.querySelectorAll('.mtile')) {
-    b.addEventListener('click', () => setTriggerValue('nav', b.id.slice('tile_'.length)))
+    b.addEventListener('click', () => { try { if (window.__jarvisSFX) window.__jarvisSFX.play('nav') } catch (e) {} setTriggerValue('nav', b.id.slice('tile_'.length)) })
   }
 }
 """
