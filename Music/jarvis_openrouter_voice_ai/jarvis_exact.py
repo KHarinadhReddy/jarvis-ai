@@ -152,7 +152,7 @@ _VOICE_NOISE_EMA = 0.005
 _VOICE_LAST_ACTIVITY_T = 0.0
 _VOICE_FAIL_COUNT = 0
 _VOICE_CLAP = False
-_WAKE_RE = re.compile(r"\bjarvis\b", re.IGNORECASE)
+_WAKE_RE = re.compile(r"\b(jarvis|activate\s+systems)\b", re.IGNORECASE)
 _JARVIS_IDLE_SLEEP_S = 86400.0  # 24h — effectively "always listening" (user asked to keep JARVIS always active)
 _VOICE_VAD_GAP_S = 1.2  # slightly longer VAD silence gap to avoid cutting utterances too early
 _VOICE_RATE = 16000
@@ -1807,9 +1807,22 @@ h1,h2,h3,h4 { font-family:'Rajdhani','Segoe UI',sans-serif !important; color:#ea
   background-image: linear-gradient(rgba(0,212,255,.18) 1px, transparent 1px), linear-gradient(90deg, rgba(0,212,255,.18) 1px, transparent 1px);
   background-size: 34px 34px; -webkit-mask: radial-gradient(circle, #000, transparent 72%); }
 
-/* voice-reactive states */
+/* voice-reactive states — Alexa-style LISTENING: pulsing ring around arc reactor */
+body.jarvis-listening { position: relative; }
+body.jarvis-listening::before {
+  content:''; position:fixed; inset:0; pointer-events:none; z-index:999;
+  background:radial-gradient(circle at center, rgba(0,212,255,.08) 0%, transparent 70%);
+}
+body.jarvis-listening .mreactor-wrap { transform: scale(1.03); transition: transform .3s ease; }
+body.jarvis-listening .mreactor::after {
+  content:''; position:absolute; inset:0; border-radius:50%; pointer-events:none;
+  border:4px solid transparent; border-top-color:var(--jgreen); border-right-color:rgba(0,120,255,.5);
+  animation:jl-listening-pulse 2.5s cubic-bezier(.6,0,.4,1) infinite;
+}
 body.jarvis-listening .mcoil { border-color: var(--jgreen); box-shadow: inset 0 0 30px rgba(0,255,179,.8), 0 0 46px rgba(0,255,179,.55); animation-duration:1.2s; }
 body.jarvis-listening .r2 { animation-duration:4s; border-top-color:var(--jgreen); }
+body.jarvis-listening .mcore-inner { color: var(--jgreen); text-shadow:0 0 20px rgba(0,255,179,.9); }
+@keyframes jl-listening-pulse { 0%,100% { inset:-6px; opacity:.8; transform:scale(.95); } 50% { inset:6px; opacity:.4; transform:scale(1.02); } }
 body.jarvis-thinking .r3 { animation-duration:1.6s; border-left-color:var(--jamber); }
 body.jarvis-thinking .mchip { color:var(--jamber); }
 body.jarvis-speaking .mcoil { border-color:#8fe8ff; box-shadow: inset 0 0 40px rgba(0,212,255,.95), 0 0 60px rgba(0,212,255,.7); }
@@ -1950,7 +1963,7 @@ def get_weather_cached() -> dict:
     return get_weather()
 
 
-# --- Hands-free voice listener (CCv2: runs in the phone browser, reports to Python) ---
+# --- Hands-free voice listener (CCv2: Alexa-style wake + battery optimization) ---
 _MOBILE_HF_JS = r"""
 export default function (component) {
   const { data, parentElement, setTriggerValue } = component
@@ -1959,50 +1972,121 @@ export default function (component) {
   if (!statusEl || !dot) return
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition
   if (!SR) {
-    statusEl.textContent = 'Hands-free is not supported in this browser — use tap-to-talk above.'
+    statusEl.textContent = 'Hands-free is not supported in this browser -- use tap-to-talk above.'
     dot.style.background = '#ff2040'
     return
   }
   const enabled = !!(data && data.enabled)
-  const wake = ((data && data.wake) || 'jarvis').toLowerCase()
   const requireWake = data ? data.requireWake !== false : true
   const lang = (data && data.lang) || 'en-US'
   const G = window.__jarvisHF || (window.__jarvisHF = {})
   const W = (function () { try { if (window.parent && window.parent.document) return window.parent } catch (e) {} return window })()
-  if (!G.rec) {
+  const page = (data && data.page) || (W.__jarvisPage) || ''
+  const DISABLE_PAGES = ['chat', 'voice', 'camera']
+  const pageEnabled = DISABLE_PAGES.indexOf(page) < 0
+  const HAS_REACTOR = page === 'home'
+  const WAKE_RE = /^(?:(?:hey|hi|ok|okey|okay|yo)\s+jarvis|jarvis|activate\s+systems|activate\s+jarvis|wake\s+up\s+jarvis)\b[\s,;:.!?\-]*/i
+  function act(msg) {
+    try {
+      if (!G.abc) G.abc = new W.BroadcastChannel('jarvis_activate')
+      G.abc.postMessage(msg)
+    } catch (e) {}
+  }
+  function showToast(msg) {
+    try {
+      var D = W.document
+      var el = D.getElementById('jv-wake-toast')
+      if (!el) {
+        el = D.createElement('div')
+        el.id = 'jv-wake-toast'
+        el.style.cssText = 'position:fixed;top:10vh;left:50%;transform:translateX(-50%);z-index:99999;' +
+          'background:linear-gradient(90deg,rgba(0,212,255,.92),rgba(0,80,180,.92));color:#fff;font-family:Orbitron,monospace;' +
+          'font-size:12px;letter-spacing:2px;padding:11px 20px;border-radius:999px;pointer-events:none;white-space:nowrap;' +
+          'text-transform:uppercase;font-weight:700;text-shadow:0 0 10px rgba(0,212,255,.9);' +
+          'box-shadow:0 0 25px rgba(0,212,255,.5),0 0 50px rgba(0,80,180,.3);' +
+          'animation:jv-toast-in .35s cubic-bezier(.17,.67,.83,.67) forwards'
+        D.body.appendChild(el)
+      }
+      el.textContent = msg
+      el.style.animation = 'none'
+      void el.offsetWidth
+      el.style.animation = 'jv-toast-pulse 1.8s infinite'
+    } catch (e) {}
+  }
+  function hideToast() {
+    try {
+      var D = W.document
+      var el = D.getElementById('jv-wake-toast')
+      if (el) { el.style.opacity = '0'; setTimeout(function(){ try{el.remove()}catch(x){} }, 300) }
+    } catch (e) {}
+  }
+  try {
+    var _d = W.document
+    if (!_d.querySelector('style[data-jv-toast]')) {
+      var _st = _d.createElement('style'); _st.setAttribute('data-jv-toast', '')
+      _st.textContent = '@keyframes jv-toast-in{from{transform:translateX(-50%) scale(0.5);opacity:0}to{transform:translateX(-50%) scale(1);opacity:1}}' +
+        '@keyframes jv-toast-pulse{0%,100%{transform:translateX(-50%) scale(0.98)}50%{transform:translateX(-50%) scale(1.04)}}' +
+        '@keyframes jv-toast-out{to{transform:translateX(-50%) scale(0.5);opacity:0}}'
+      _d.head.appendChild(_st)
+    }
+  } catch (e) {}
+  function stopSpeech() {
+    try { if (window.__jarvisTTS && window.__jarvisTTS.bc) window.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
+    try { if (W.__jarvisTTS && W.__jarvisTTS.bc) W.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
+  }
+  function speakResponse(txt) {
+    // Use browser speechSynthesis for instant wake response (no server round-trip)
+    try {
+      if ('speechSynthesis' in window && txt) {
+        window.speechSynthesis.cancel()
+        var u = new SpeechSynthesisUtterance(txt)
+        u.rate = 0.95; u.pitch = 0.95; u.volume = 0.85
+        try { u.lang = lang } catch (x) {}
+        window.speechSynthesis.speak(u)
+      }
+    } catch (e) {}
+  }
+  function startSR() {
+    if (G.recActive) return
     const rec = new SR()
     rec.continuous = true
     rec.interimResults = true
     rec.lang = lang
-    G.rec = rec
-    G.running = false
-    G.enabled = false
+    G.recActive = true
     rec.onstart = function () {
-      G.running = true
-      statusEl.textContent = 'Listening… say “' + wake + ' …”'
+      if (!G.enabled) return
       dot.style.background = '#00ffb3'
-      if (G.enabled) document.body.classList.add('jarvis-listening')
+      document.body.classList.add('jarvis-listening')
     }
     rec.onend = function () {
-      G.running = false
-      if (!G.enabled) { document.body.classList.remove('jarvis-listening'); return }
+      G.recActive = false
+      if (!G.enabled || G.blocked) return
       setTimeout(function restart() {
-        if (!G.enabled) return
+        if (!G.enabled || G.blocked) return
         try { if (W.__jarvisSpeaking) { setTimeout(restart, 1200); return } } catch (e) {}
         try { rec.start() } catch (e) {}
       }, 400)
     }
     rec.onerror = function (e) {
-      G.running = false
+      G.recActive = false
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        G.enabled = false
+        G.blocked = true
         document.body.classList.remove('jarvis-listening')
-        statusEl.textContent = 'Mic permission denied — allow the mic or use tap-to-talk.'
-        dot.style.background = '#ff2040'
-      } else if (e.error === 'no-speech' || e.error === 'aborted') {
-        statusEl.textContent = 'Listening… say “' + wake + ' …”'
-      } else {
-        statusEl.textContent = 'Voice error: ' + e.error
+        statusEl.textContent = 'Tap once to enable hands-free.'
+        dot.style.background = '#ffb020'
+        try {
+          var D = W.document
+          if (!G.gestureBound) {
+            G.gestureBound = true
+            D.addEventListener('pointerdown', function once() {
+              try { D.removeEventListener('pointerdown', once, true) } catch (x) {}
+              G.gestureBound = false
+              if (!G.enabled) return
+              G.blocked = false
+              try { rec.start() } catch (x) {}
+            }, true)
+          }
+        } catch (x) {}
       }
     }
     rec.onresult = function (ev) {
@@ -2012,61 +2096,81 @@ export default function (component) {
         const t = ((r[0] && r[0].transcript) || '').trim()
         if (!t) continue
         if (r.isFinal) {
+          var low = t.toLowerCase()
           var nowMs = Date.now()
-          // Never react to JARVIS's own voice coming back through the phone mic.
           try {
-            if (W.__jarvisSpeaking || (W.__jarvisSpeechEnd && (nowMs - W.__jarvisSpeechEnd) < 2400)) {
-              statusEl.textContent = '…'
-              continue
-            }
+            if (W.__jarvisSpeaking || (W.__jarvisSpeechEnd && (nowMs - W.__jarvisSpeechEnd) < 2400)) continue
           } catch (e) {}
-          var cmd = t
-          if (requireWake) {
-            var low = t.toLowerCase()
-            var wx = wake.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-            var mm = low.match(new RegExp('^(?:hey\\s+)?' + wx + '\\b[\\s,;:.!?\\-]*'))
-            if (!mm) {
-              statusEl.textContent = 'Heard “' + t + '” — say “' + wake + ' …”'
+          var wm = requireWake ? low.match(WAKE_RE) : null
+          var cmd = ''
+          if (wm) {
+            cmd = t.slice(wm[0].length).trim().replace(/^[\s,\.\!\?:\-]+/, '')
+            G.awaitCmdUntil = nowMs + 3000
+            if (!cmd) {
+              // Alexa-style: bloom + spoken "yes sir" + waiting state
+              if (!G.lastWakeTs || (nowMs - G.lastWakeTs) > 3500) {
+                act('wake')
+                speakResponse('Yes sir. I am listening. What would you like me to do?')
+                statusEl.textContent = 'LISTENING -- say your task in 3s'
+              }
+              G.lastWakeTs = nowMs
+              // Show "listening" state on arc reactor or toast (pages without reactor)
+              document.body.classList.add('jarvis-listening')
+              if (!HAS_REACTOR) showToast('LISTENING')
+              act('thinking')
+              // Timeout after 3s: back to idle
+              G.wakeTimeout = setTimeout(function () {
+                document.body.classList.remove('jarvis-listening')
+                act('idle')
+                dot.style.background = '#3a5a75'
+                statusEl.textContent = 'Say “Jarvis” to activate'
+                if (!HAS_REACTOR) hideToast()
+              }, G.awaitCmdUntil - nowMs)
               continue
             }
-            cmd = t.slice(mm[0].length).trim().replace(/^[\s,\.\!\?:\-]+/, '')
-            if (!cmd) cmd = 'hello'
-          }
-          // Ignore a repeated transcript (echo / recognizer restart).
-          if (G.lastCmd === cmd && (nowMs - (G.lastCmdTs || 0)) < 6000) {
+          } else if (!requireWake) {
+            cmd = t
+          } else if (G.wakeTimeout && nowMs < G.awaitCmdUntil) {
+            cmd = t
+          } else {
+            // Pass through — no action
             statusEl.textContent = '…'
             continue
           }
-          G.lastCmd = cmd
-          G.lastCmdTs = nowMs
+          cmd = cmd.trim()
+          if (!cmd) continue
+          clearTimeout(G.wakeTimeout)
+          G.wakeTimeout = null
+          document.body.classList.remove('jarvis-listening')
+          act('idle')
+          if (!HAS_REACTOR) hideToast()
+          if (G.lastCmd === cmd && (nowMs - (G.lastCmdTs || 0)) < 6000) continue
+          G.lastCmd = cmd; G.lastCmdTs = nowMs
           statusEl.textContent = 'Heard: "' + cmd + '"'
-          if (window.__jarvisSFX) window.__jarvisSFX.play('wake')
-          // STOP any ongoing TTS when wake word is recognized
-          try { if (window.__jarvisTTS && window.__jarvisTTS.bc) window.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
-          try { if (W.__jarvisTTS && W.__jarvisTTS.bc) W.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
+          stopSpeech()
+          act('thinking')
           setTriggerValue('heard', cmd)
+          return
         } else {
           interim = t
         }
       }
       if (interim) statusEl.textContent = '…' + interim
     }
-  } else {
-    G.rec.lang = lang
   }
+  // Orchestration
+  if (G.running) return
+  if (G.blocked) { statusEl.textContent = 'Tap once to enable hands-free.'; dot.style.background = '#ffb020'; return }
   G.enabled = enabled
-  if (enabled && !G.running) { try { G.rec.start() } catch (e) {} }
-  if (!enabled && G.running) { try { G.rec.stop() } catch (e) {} }
-  if (!enabled) {
-    statusEl.textContent = 'Hands-free is off — turn on the toggle above.'
-    dot.style.background = '#3a5a75'
-    document.body.classList.remove('jarvis-listening')
-  }
+  if (!enabled) { statusEl.textContent = 'Hands-free is off -- turn on the toggle above.'; dot.style.background = '#3a5a75'; act('idle'); return }
+  if (!pageEnabled) { statusEl.textContent = 'Jarvis activation: disabled on this page.'; dot.style.background = '#3a5a75'; return }
+  G.running = true
+  if (enabled && !G.blocked) { try { startSR() } catch (e) {} }
   return function () {
-    try { G.enabled = false; if (G.rec && G.running) G.rec.stop() } catch (e) {}
-    G.rec = null
-    G.running = false
+    try { G.enabled = false; if (G.recActive) G.rec.stop() } catch (e) {}
+    G.running = false; clearTimeout(G.wakeTimeout)
     document.body.classList.remove('jarvis-listening')
+    act('idle')
   }
 }
 """
@@ -2654,6 +2758,187 @@ except Exception:
     _MOBILE_CLOCK = None
 
 
+# --- Activation overlay (Gemini-style multicolour aurora orb, listens on jarvis_activate channel) ---
+_MOBILE_ACTIVATE_JS = r"""
+export default function (component) {
+  const { data, parentElement } = component
+  const W = (function () { try { if (window.parent && window.parent.document) return window.parent } catch (e) {} return window })()
+  const doc = W.document
+  const G = W.__jarvisActivate || (W.__jarvisActivate = {})
+  const overlayId = 'jarvis-activate-overlay'
+
+  // Build the overlay DOM once (fixed in parent document, pointer-events none)
+  function ensureOverlay() {
+    if (doc.getElementById(overlayId)) return doc.getElementById(overlayId)
+    const el = doc.createElement('div')
+    el.id = overlayId
+    el.style.cssText = `
+      position: fixed; inset: 0; z-index: 99999; pointer-events: none;
+      display: flex; align-items: center; justify-content: center;
+      transition: opacity 0.2s ease;
+    `
+    el.innerHTML = `
+      <div id="jv-orb" style="
+        position: relative;
+        width: 120px; height: 120px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 40% 30%, #00ffff 0%, #8000ff 35%, #ff0080 70%, #ffaa00 100%);
+        filter: blur(24px) brightness(1.3);
+        opacity: 0;
+        transform: scale(0.6);
+        transition: opacity 0.25s ease, transform 0.3s cubic-bezier(0.34,1.56,0.64,1), filter 0.3s;
+        box-shadow:
+          0 0 60px 20px rgba(0,255,255,0.4),
+          0 0 100px 40px rgba(128,0,255,0.3),
+          0 0 140px 60px rgba(255,0,128,0.2),
+          inset 0 0 40px rgba(255,255,255,0.3);
+      ">
+        <div style="
+          position: absolute; inset: 18px; border-radius: 50%;
+          background: radial-gradient(circle at 50% 50%, #00ffff 0%, #0088ff 40%, #003366 100%);
+          box-shadow:
+            inset 0 0 30px rgba(0,255,255,0.6),
+            0 0 20px rgba(0,255,255,0.5);
+          animation: jv-core-pulse 2.2s ease-in-out infinite;
+        "></div>
+        <div style="
+          position: absolute; inset: 8px; border-radius: 50%;
+          border: 2px solid rgba(0,255,255,0.6);
+          box-shadow: 0 0 30px rgba(0,255,255,0.4);
+          animation: jv-ring-spin 12s linear infinite;
+        "></div>
+        <div style="
+          position: absolute; inset: 28px; border-radius: 50%;
+          border: 1px dashed rgba(255,170,0,0.5);
+          animation: jv-ring-spin 8s linear infinite reverse;
+        "></div>
+        <div style="
+          position: absolute; inset: 44px; border-radius: 50%;
+          border: 1px solid rgba(255,0,128,0.4);
+          animation: jv-ring-spin 20s linear infinite;
+        "></div>
+      </div>
+      <style>
+        @keyframes jv-core-pulse { 0%,100% { transform: scale(1); opacity: 0.9; } 50% { transform: scale(1.08); opacity: 1; } }
+        @keyframes jv-ring-spin { to { transform: rotate(360deg); } }
+        @keyframes jv-wake-bloom { 0% { transform: scale(0.6); opacity: 0; } 60% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); opacity: 1; } }
+        @keyframes jv-thinking-spin { 0% { transform: scale(1) rotate(0deg); filter: hue-rotate(0deg); } 100% { transform: scale(1.02) rotate(360deg); filter: hue-rotate(360deg); } }
+        @keyframes jv-speaking-wave { 0% { box-shadow: 0 0 60px 20px rgba(0,255,255,0.4), 0 0 100px 40px rgba(128,0,255,0.3), 0 0 140px 60px rgba(255,0,128,0.2); } 50% { box-shadow: 0 0 80px 30px rgba(0,255,255,0.6), 0 0 130px 50px rgba(128,0,255,0.5), 0 0 180px 80px rgba(255,0,128,0.35); } 100% { box-shadow: 0 0 60px 20px rgba(0,255,255,0.4), 0 0 100px 40px rgba(128,0,255,0.3), 0 0 140px 60px rgba(255,0,128,0.2); } }
+      </style>
+    `
+    doc.body.appendChild(el)
+    G.orb = el.querySelector('#jv-orb')
+    G.state = 'idle' // idle | wake | listening | thinking | speaking
+    return el
+  }
+
+  const overlay = ensureOverlay()
+  const orb = G.orb
+
+  function setState(state) {
+    if (!orb) return
+    G.state = state
+    orb.style.transition = 'opacity 0.25s ease, transform 0.3s cubic-bezier(0.34,1.56,0.64,1), filter 0.3s, box-shadow 0.3s'
+    orb.className = 'jv-state-' + state
+    switch (state) {
+      case 'idle':
+        orb.style.opacity = '0'
+        orb.style.transform = 'scale(0.6)'
+        orb.style.filter = 'blur(24px) brightness(1.3)'
+        orb.style.animation = 'none'
+        orb.style.boxShadow = '0 0 60px 20px rgba(0,255,255,0.4), 0 0 100px 40px rgba(128,0,255,0.3), 0 0 140px 60px rgba(255,0,128,0.2), inset 0 0 40px rgba(255,255,255,0.3)'
+        break
+      case 'wake':
+        orb.style.opacity = '1'
+        orb.style.transform = 'scale(1)'
+        orb.style.filter = 'blur(28px) brightness(1.5)'
+        orb.style.animation = 'jv-wake-bloom 0.55s cubic-bezier(0.34,1.56,0.64,1)'
+        if (window.__jarvisSFX) window.__jarvisSFX.play('wake')
+        break
+      case 'listening':
+        orb.style.opacity = '1'
+        orb.style.transform = 'scale(1.02)'
+        orb.style.filter = 'blur(30px) brightness(1.4) hue-rotate(100deg)'
+        orb.style.animation = 'jv-core-pulse 1.2s ease-in-out infinite'
+        break
+      case 'thinking':
+        orb.style.opacity = '1'
+        orb.style.transform = 'scale(1.05)'
+        orb.style.filter = 'blur(32px) brightness(1.3)'
+        orb.style.animation = 'jv-thinking-spin 3s linear infinite'
+        break
+      case 'speaking':
+        orb.style.opacity = '1'
+        orb.style.transform = 'scale(1.08)'
+        orb.style.filter = 'blur(36px) brightness(1.5)'
+        orb.style.animation = 'jv-speaking-wave 0.8s ease-in-out infinite'
+        break
+    }
+  }
+
+  // Listen for TTS speaking state to auto-switch to speaking/idle
+  function onTTSMessage(e) {
+    if (e.data === 'SPEAKING_START') setState('speaking')
+    else if (e.data === 'SPEAKING_END') setState('idle')
+  }
+  try {
+    if (!G.ttsBound) {
+      G.ttsBound = true
+      const bc = new BroadcastChannel('jarvis_tts')
+      bc.onmessage = onTTSMessage
+    }
+  } catch (e) {}
+
+  // Listen for activation events from hands-free / hold-to-talk
+  try {
+    if (!G.actBound) {
+      G.actBound = true
+      const abc = new BroadcastChannel('jarvis_activate')
+      abc.onmessage = function (e) {
+        const msg = e.data
+        if (msg === 'wake') setState('wake')
+        else if (msg === 'listening') setState('listening')
+        else if (msg === 'thinking') setState('thinking')
+        else if (msg === 'idle') setState('idle')
+        else if (msg === 'speaking') setState('speaking')
+      }
+    }
+  } catch (e) {}
+
+  // Initial state from data prop (for SSR hydration if needed)
+  const initial = (data && data.state) || 'idle'
+  if (initial !== 'idle') setState(initial)
+
+  return function () {
+    try { if (orb) orb.style.opacity = '0' } catch (e) {}
+  }
+}
+"""
+
+try:
+    _MOBILE_ACTIVATE = _ccv2_component(
+        "jarvis_mobile_activate",
+        '''<div style="display:none"></div>''',
+        _MOBILE_ACTIVATE_JS,
+    )
+except Exception:
+    _MOBILE_ACTIVATE = None
+
+
+def _mobile_activate_mount() -> None:
+    """Mount the global activation overlay (invisible until wake)."""
+    if _MOBILE_ACTIVATE is None:
+        return
+    try:
+        _MOBILE_ACTIVATE(
+            key="m_activate",
+            data={"state": "idle"},
+            height=1,
+        )
+    except Exception:
+        pass
+
+
 def _mobile_clock_mount() -> None:
     if _MOBILE_CLOCK is None:
         return
@@ -2678,6 +2963,13 @@ export default function (component) {
   btn.style.opacity = supported ? '1' : '0.45'
   if (lbl) lbl.textContent = supported ? 'Hold to talk' : 'Type instead'
   let retries = 0
+  const W = (function () { try { if (window.parent && window.parent.document) return window.parent } catch (e) {} return window })()
+  function act(msg) {
+    try {
+      if (!G.abc) G.abc = new W.BroadcastChannel('jarvis_activate')
+      G.abc.postMessage(msg)
+    } catch (e) {}
+  }
   function showGlow() {
     if (!glow || !btn) return
     const r = btn.getBoundingClientRect()
@@ -2690,7 +2982,7 @@ export default function (component) {
     btn.classList.toggle('recording', on)
     try { document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
     try { window.parent.document.body.classList.toggle('jarvis-listening', on) } catch (e) {}
-    if (on) { if (lbl) lbl.textContent = 'Listening…' } else if (lbl) lbl.textContent = 'Hold to talk'
+    if (on) { if (lbl) lbl.textContent = 'Listening...' } else if (lbl) lbl.textContent = 'Hold to talk'
     if (glow) glow.style.display = on ? 'block' : 'none'
     if (window.__jarvisSFX) window.__jarvisSFX.play(on ? 'listen' : 'stop')
   }
@@ -2699,6 +2991,7 @@ export default function (component) {
     // STOP any ongoing TTS the moment user starts speaking
     try { if (window.__jarvisTTS && window.__jarvisTTS.bc) window.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
     try { if (window.parent && window.parent.__jarvisTTS && window.parent.__jarvisTTS.bc) window.parent.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
+    act('wake')                      // Bloom the orb immediately on press
     showGlow()                        // Red pulse shows IMMEDIATELY on press
     if (!supported) {
       if (lbl) lbl.textContent = 'Type instead'
@@ -2714,7 +3007,7 @@ export default function (component) {
     rec.continuous = false
     rec.interimResults = true
     rec.maxAlternatives = 1
-    rec.onstart = function () { G.active = true; setRec(true) }
+    rec.onstart = function () { G.active = true; setRec(true); act('listening') }
     rec.onresult = function (ev) {
       let txt = ''
       for (let i = 0; i < ev.results.length; i++) txt += (ev.results[i][0] && ev.results[i][0].transcript) || ''
@@ -2724,20 +3017,22 @@ export default function (component) {
     rec.onerror = function (err) {
       G.active = false
       setRec(false)
+      act('idle')
       if (lbl) {
         if (err.error === 'not-allowed' || err.error === 'service-not-allowed') lbl.textContent = 'Allow mic access'
         else if ((err.error === 'no-speech' || err.error === 'aborted') && retries < 2) {
           retries++
           lbl.textContent = 'Tap again'
           setTimeout(begin, 250)
-        } else lbl.textContent = 'Try again — tap the mic'
+        } else lbl.textContent = 'Try again -- tap the mic'
       }
     }
     rec.onend = function () {
       G.active = false
       const t = (G.text || '').trim()
-      if (t) { try { setTriggerValue('transcript', t) } catch (x) {} ; G.text = '' }
+      if (t) { try { setTriggerValue('transcript', t) } catch (x) {} ; G.text = '' ; act('thinking') }
       setRec(false)
+      act('idle')
     }
     try { rec.start() } catch (x) {
       // Glow already shown; if SR never starts, clear it after a moment.
@@ -2762,6 +3057,7 @@ export default function (component) {
     try { if (G.rec) G.rec.abort() } catch (e) {}
     try { window.parent.document.body.classList.remove('jarvis-listening') } catch (e) {}
     hideGlow()
+    act('idle')
   }
 }
 """
@@ -3167,6 +3463,7 @@ def _mobile_transcribe(wav_bytes: bytes, lang: str = "en-US") -> str:
 
 
 def _mobile_hf_mount() -> None:
+    """Global invisible hands-free mount (height=1). Voice page shows status via caption."""
     if _MOBILE_HF is None:
         return
     try:
@@ -3177,9 +3474,10 @@ def _mobile_hf_mount() -> None:
                 "wake": "jarvis",
                 "requireWake": True,
                 "lang": st.session_state.get("stt_lang", "en-US"),
+                "page": st.session_state.get("_mobile_page_sel", "home"),
             },
             on_heard_change=lambda: None,
-            height=48,
+            height=1,  # invisible — overlay shows state
         )
     except Exception:
         return
@@ -3212,7 +3510,11 @@ def _mobile_page_voice(use_voice) -> None:
     if hf_now != hf_prev:
         st.session_state["_hf_enabled"] = hf_now
     st.caption("Hands-free works best in Chrome on Android. Tap-to-talk works on every phone.")
-    _mobile_hf_mount()
+    # Hands-free is mounted globally (invisible). Show its status here.
+    if st.session_state.get("_hf_enabled"):
+        st.caption("🎙 Hands-free active — say “Jarvis”, “Hey Jarvis”, or “Activate systems” anytime.")
+    else:
+        st.caption("Hands-free is off. Enable the toggle above to wake JARVIS by voice.")
     st.markdown('<div class="mnote">Tap the mic, speak, then stop — JARVIS transcribes and answers. The phone mic and speaker do the work.</div>', unsafe_allow_html=True)
     audio = st.audio_input("Tap to record", sample_rate=16000, key="m_audio")
     if audio is not None:
@@ -3746,6 +4048,74 @@ def _mobile_try_intent(prompt: str):
         st.session_state.tasks = tasks
         save_tasks(tasks)
         return ("reply", f"Planning “{goal}” — added a plan task. Break it into steps and add each step as its own task.")
+
+    # --- Shell command automation ---
+    # "open youtube" -> open YouTube in browser
+    if re.match(r"^(?:open|go to|launch)\s+youtube\b", p):
+        try:
+            import subprocess as _sp
+            _sp.Popen(["cmd", "/c", "start", "https://www.youtube.com"], shell=True)
+            return ("reply", "Opening YouTube.")
+        except Exception:
+            return ("reply", "Could not open YouTube.")
+    # "open [url/site]" -> open a URL in browser
+    m = re.match(r"^(?:open|go to|visit)\s+(https?://\S+)", p)
+    if m:
+        try:
+            import subprocess as _sp
+            _sp.Popen(["cmd", "/c", "start", m.group(1)], shell=True)
+            return ("reply", f"Opening {m.group(1)}.")
+        except Exception:
+            return ("reply", "Could not open that link.")
+    # "open [site]" -> open a known site
+    m = re.match(r"^(?:open|go to|launch)\s+(.+)\b", p)
+    if m and not m.group(1).startswith("http"):
+        site_name = m.group(1).strip().rstrip(".")
+        known_sites = {
+            "gmail": "https://mail.google.com", "google": "https://www.google.com",
+            "docs": "https://docs.google.com", "sheets": "https://sheets.google.com",
+            "maps": "https://www.google.com/maps", "gmail.com": "https://mail.google.com",
+            "github": "https://github.com", "calendar": "https://calendar.google.com",
+            "spotify": "https://open.spotify.com",
+        }
+        url = known_sites.get(site_name.lower())
+        if url:
+            try:
+                import subprocess as _sp
+                _sp.Popen(["cmd", "/c", "start", url], shell=True)
+                return ("reply", f"Opening {site_name}.")
+            except Exception:
+                return ("reply", f"Could not open {site_name}.")
+    # "run [command]" -> execute shell command
+    m = re.match(r"^(?:run|execute|execute command)\s+(.+)$", p, re.I)
+    if m:
+        cmd_str = m.group(1).strip()
+        blocked = ("rm ", "del ", "format ", "shutdown", "formatc", "rmdir ", "mklink", "install ", "apt install")
+        if any(b in cmd_str.lower() for b in blocked):
+            return ("reply", "That command is not allowed. I can run read-only commands like list files, check system status, or open apps.")
+        try:
+            import subprocess as _sp
+            result = _sp.run(["cmd", "/c", cmd_str], capture_output=True, text=True, timeout=10)
+            out = (result.stdout or "").strip() or (result.stderr or "").strip()
+            return ("reply", (out[:400] or f"Command ran: {cmd_str}"))
+        except Exception:
+            return ("reply", "Could not run that command.")
+
+    # --- Phase 2/3 Automation via AutomationEngine ---
+    try:
+        import automation_engine as ae
+        result = ae.dispatch_command(prompt)
+        if result.get("success"):
+            msg = result.get("message", "Done")
+            if result.get("should_speak", True):
+                return ("reply", msg)
+            # should_speak=False means just show it (no TTS)
+            st.session_state["msgs"].append({"role": "assistant", "content": msg, "_tts_id": _new_tts_id()})
+            st.session_state["_tts_fresh"] = st.session_state["msgs"][-1]["_tts_id"]
+            return ("nav", None)
+    except Exception:
+        pass
+
     return None
 
 
@@ -4054,6 +4424,9 @@ def _render_mobile_app() -> None:
         model = DEFAULT
     use_fast = bool(st.session_state.get("fast_toggle", False))
     use_voice = bool(st.session_state.get("use_voice", True))
+    # Default hands-free to ON so the wake overlay works immediately
+    if "_hf_enabled" not in st.session_state:
+        st.session_state["_hf_enabled"] = True
     _qp_page = _qp_str("page", "").strip().lower()
     if _qp_page in MOBILE_PAGES and _qp_page != st.session_state.get("_qp_last_page"):
         st.session_state["_qp_last_page"] = _qp_page
@@ -4089,6 +4462,9 @@ def _render_mobile_app() -> None:
     _mobile_sfx(_sfx_event, "thinking" if st.session_state.get("_mobile_gen") else "")
     _mobile_pwa_mount()
     _mobile_clock_mount()
+    # Global mounts: activation overlay (any page) + hands-free listener (invisible, all pages)
+    _mobile_activate_mount()
+    _mobile_hf_mount()
     # If a fresh reply landed on a page that has no voice widget, speak it here once
     # (and never leave stale freshness around to replay an old chat later).
     if page not in ("chat", "voice") and st.session_state.get("_tts_fresh"):
@@ -4721,6 +5097,25 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
     if _voice_cmd:
         st.session_state.jarvis_prompt = _voice_cmd
         st.session_state["_voice_dispatch"] = True
+
+    # --- Desktop automation dispatch (Phase 2/3) ---
+    if st.session_state.msgs:
+        _last_user = next((m["content"] for m in reversed(st.session_state.msgs) if m.get("role") == "user"), "")
+        if _last_user.strip():
+            try:
+                import automation_engine as ae
+                _ar = ae.dispatch_command(_last_user.strip())
+                if _ar.get("success"):
+                    _amsg = {"role": "assistant", "content": _ar.get("message", "Done")}
+                    if _ar.get("should_speak", True):
+                        _amsg["_tts_id"] = _new_tts_id()
+                        st.session_state["_tts_fresh"] = _amsg["_tts_id"]
+                    st.session_state.msgs.append(_amsg)
+                    st.session_state.prompt_input = ""
+                    st.session_state._generating_reply = False
+                    st.rerun()
+            except Exception:
+                pass
 
     # Send logic
     if sent or st.session_state.get("_voice_dispatch", False):
