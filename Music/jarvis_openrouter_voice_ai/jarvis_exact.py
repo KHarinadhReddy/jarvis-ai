@@ -3070,12 +3070,10 @@ try:
     <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
   </button>
   <span id="holdlbl" style="font-size:9px;letter-spacing:.6px;color:#6f9ab8;white-space:nowrap;text-transform:uppercase;">Hold to talk</span>
-  <!-- Pulse ring that expands around the mic while listening (light-transparent JARVIS red) -->
-  <div id="micglow" style="display:none;position:fixed;width:220px;height:220px;border-radius:50%;pointer-events:none;z-index:6;background:radial-gradient(circle,rgba(255,85,119,.42) 0%,rgba(255,85,119,.16) 42%,rgba(255,85,119,.05) 68%,transparent 90%);box-shadow:0 0 30px rgba(255,85,119,.55),0 0 62px rgba(255,85,119,.3);animation:micglowpulse 1.1s ease-in-out infinite;"></div>
+  <!-- Pulse ring that expands around the mic while listening (REMOVED per user request) -->
+  <div id="micglow" style="display:none;position:fixed;width:220px;height:220px;border-radius:50%;pointer-events:none;z-index:6;background:transparent;box-shadow:none;animation:none;"></div>
   <style>
-    #holdmic.recording { background: radial-gradient(circle at 30% 25%, #ff5577, #b3002b) !important; border-color:#ff3355 !important; color:#fff !important; box-shadow:0 0 34px rgba(255,51,85,.85), inset 0 0 18px rgba(255,51,85,.5) !important; animation: holdpulse .6s ease-in-out infinite; }
-    @keyframes holdpulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.07); } }
-    @keyframes micglowpulse { 0%,100% { opacity:.85; transform: translate(-50%,-50%) scale(.85); } 50% { opacity:1; transform: translate(-50%,-50%) scale(1.22); } }
+    #holdmic.recording { background: rgba(0,80,140,.45) !important; border-color:#00d4ff !important; color:#fff !important; box-shadow:0 0 16px rgba(0,212,255,.25) !important; animation:none; }
   </style>
 </div>''',
         _MOBILE_HOLD_JS,
