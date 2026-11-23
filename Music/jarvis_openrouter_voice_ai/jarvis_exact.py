@@ -1318,47 +1318,65 @@ def synthesize_human_speech(text: str, voice: str = "en-US-GuyNeural", gender: s
     return data
 
 
-def voice_html(text: str, audio_b64: str | None, lang: str = "", speak_token: str = "") -> str:
-    """Direct speak — invisible, no box/buttons. Edge audio if present, else browser voice instantly.
-    Uses a single shared player and stops any previous playback."""
+def voice_html(text: str, audio_b64: str | None, lang: str = "", speak_token: str = "", auto: bool = False) -> str:
+    """Speak a just-generated reply ONCE. Restored history stays silent.
+    Uses one shared player on the parent window; never replays on reruns, voiceschanged or clicks."""
     import json as _json
     safe = _json.dumps(text)
     langjson = _json.dumps(lang or "en-US")
     b64json = _json.dumps(audio_b64 or "")
     tokenjson = _json.dumps(speak_token or "")
-    audio_tag = f'<audio id="jarvis-direct-voice" preload="auto" style="display:none;"><source src="data:audio/mp3;base64,{audio_b64}" type="audio/mp3"></audio>' if audio_b64 else ""
-    has_audio = "true" if audio_b64 else "false"
+    autojs = "true" if auto else "false"
     return f"""
-<style>body{{margin:0;background:transparent;}} audio{{display:none;}}</style>
-{audio_tag}
+<style>body{{margin:0;background:transparent;}}</style>
 <script>
 (function(){{
   var full = {safe};
   var ulang = {langjson};
-  var hasAudio = {has_audio};
-  var audio = document.getElementById('jarvis-direct-voice');
   var audioB64 = {b64json};
   var stoken = {tokenjson};
-  // GLOBAL shared player on the parent window (survives iframe remounts)
+  var auto = {autojs};
+  if (!auto || !stoken) return;
+  // Single shared player on the parent window (survives iframe remounts)
   var W = (function(){{ try {{ if (window.parent && window.parent.document) return window.parent }} catch (e) {{}} return window }})()
-  var G = W.__jarvisTTS || (W.__jarvisTTS = {{ audio: null, token: '', playing: false, bc: null, startedAt: 0 }})
+  var G = W.__jarvisTTS || (W.__jarvisTTS = {{ audio: null, token: '', playing: false, bc: null, timer: null, srcToken: '', startedAt: 0 }})
+  var KEY = 'jv_spoken_' + stoken
+  function alreadySpoken() {{
+    try {{ if (W.sessionStorage && W.sessionStorage.getItem(KEY) === '1') return true }} catch (e) {{}}
+    try {{
+      var ts = parseInt((W.localStorage && W.localStorage.getItem(KEY)) || '0', 10)
+      if (ts && (Date.now() - ts) < 43200000) return true
+    }} catch (e) {{}}
+    return false
+  }}
+  function markSpoken() {{
+    try {{ if (W.sessionStorage) W.sessionStorage.setItem(KEY, '1') }} catch (e) {{}}
+    try {{ if (W.localStorage) W.localStorage.setItem(KEY, String(Date.now())) }} catch (e) {{}}
+  }}
+  function unmarkSpoken() {{
+    try {{ if (W.sessionStorage) W.sessionStorage.removeItem(KEY) }} catch (e) {{}}
+    try {{ if (W.localStorage) W.localStorage.removeItem(KEY) }} catch (e) {{}}
+  }}
+  if (alreadySpoken()) return;
+  function noteSpeaking(on) {{
+    try {{ W.__jarvisSpeaking = !!on }} catch (e) {{}}
+    if (!on) {{ try {{ W.__jarvisSpeechEnd = Date.now() }} catch (e) {{}} }}
+    try {{ if (G.bc) G.bc.postMessage(on ? 'SPEAKING_START' : 'SPEAKING_END') }} catch (e) {{}}
+  }}
   function stopAll() {{
-    if (G.audio) {{ try {{ G.audio.pause(); G.audio.currentTime = 0 }} catch (e) {{}} G.audio = null }}
+    if (G.audio) {{ try {{ G.audio.pause() }} catch (e) {{}} try {{ G.audio.currentTime = 0 }} catch (e) {{}} }}
     if ('speechSynthesis' in window) {{ try {{ window.speechSynthesis.cancel() }} catch (e) {{}} }}
     try {{ if (W !== window && W.speechSynthesis) W.speechSynthesis.cancel() }} catch (e) {{}}
     G.playing = false; G.token = ''
+    noteSpeaking(false)
   }}
   try {{
     if (!G.bc) {{ G.bc = new W.BroadcastChannel('jarvis_tts'); G.bc.onmessage = function(e){{ if(e.data==='STOP') stopAll() }} }}
   }} catch (e) {{}}
-  function broadcastStop() {{ try {{ if (G.bc) G.bc.postMessage('STOP') }} catch (e) {{}} }}
-  function alreadySpoken() {{ try {{ return stoken && W.sessionStorage.getItem('jv_dsp_'+stoken) === '1' }} catch (e) {{ return false }} }}
-  function markSpoken() {{ try {{ if (stoken) W.sessionStorage.setItem('jv_dsp_'+stoken, '1') }} catch (e) {{}} }}
   function browserSpeak(){{
     if(!('speechSynthesis' in window) || !full) return;
     try {{
       stopAll()
-      speechSynthesis.cancel();
       var msg = new SpeechSynthesisUtterance(full);
       msg.rate = 0.95; msg.pitch = 0.95; msg.volume = 1.0;
       var voices = speechSynthesis.getVoices();
@@ -1371,36 +1389,46 @@ def voice_html(text: str, audio_b64: str | None, lang: str = "", speak_token: st
         || voices.find(v => v.lang.startsWith('en-US'))
         || voices.find(v => v.lang.startsWith('en'));
       if(preferred) {{ msg.voice = preferred; try {{ msg.lang = (ulang || preferred.lang || '') }} catch (e) {{}} }}
+      msg.onstart = function () {{ noteSpeaking(true) }}
+      msg.onend = function () {{ noteSpeaking(false); G.playing = false; G.token = '' }}
+      msg.onerror = function () {{ noteSpeaking(false); G.playing = false; G.token = '' }}
       speechSynthesis.speak(msg);
+      G.playing = true
+      G.token = stoken
     }} catch(e) {{}}
   }}
   function tryPlay(){{
-    if(!hasAudio || !audioB64) {{ browserSpeak(); return; }}
-    var target = G.audio;
-    try {{ if (W !== window && W.Audio && !target) {{ target = new W.Audio(); target.setAttribute('playsinline', '') }} }} catch (e) {{}}
-    if (!target) target = audio;
-    if (!target) {{ browserSpeak(); return; }}
-    broadcastStop()
-    stopAll()
-    G.audio = target
-    G.playing = true
-    G.startedAt = Date.now()
-    target.onended = function () {{ stopAll() }}
-    target.onerror = function () {{ stopAll(); browserSpeak() }}
-    try {{ target.src = 'data:audio/mp3;base64,' + audioB64 }} catch (e) {{}}
-    var p;
-    try {{ p = target.play(); }} catch (e) {{ browserSpeak(); return; }}
-    if(p && p.catch) p.catch(function(){{ browserSpeak(); }});
+    markSpoken();
+    if(!audioB64) {{ browserSpeak(); return; }}
+    var a = G.audio;
+    try {{ if (!a && W !== window && W.Audio) {{ a = new W.Audio(); a.setAttribute('playsinline', '') }} }} catch (e) {{}}
+    if (!a) {{ try {{ a = new Audio() }} catch (e) {{}} }}
+    if (!a) {{ unmarkSpoken(); browserSpeak(); return; }}
+    try {{
+      if (G.srcToken !== stoken || !a.src) {{
+        a.src = 'data:audio/mp3;base64,' + audioB64
+        G.srcToken = stoken
+        try {{ a.load() }} catch (e) {{}}
+      }} else {{
+        try {{ a.currentTime = 0 }} catch (e) {{}}
+      }}
+      G.audio = a
+      G.playing = true
+      G.token = stoken
+      G.startedAt = Date.now()
+      a.onended = function () {{ stopAll() }}
+      a.onerror = function () {{ unmarkSpoken(); stopAll(); browserSpeak() }}
+      noteSpeaking(true)
+      var p;
+      try {{ p = a.play(); }} catch (e) {{ unmarkSpoken(); browserSpeak(); return; }}
+      if(p && p.catch) p.catch(function(){{ unmarkSpoken(); stopAll(); browserSpeak(); }});
+    }} catch (e) {{ unmarkSpoken(); browserSpeak(); }}
   }}
-  if (alreadySpoken()) {{ return; }}
-  markSpoken();
   tryPlay();
-  // Unlock on first real user gesture anywhere (no visible box)
-  document.addEventListener('click', function once(){{
-    try {{ if(hasAudio && audio && audio.paused) audio.play(); }} catch(e){{}}
-    try {{ if('speechSynthesis' in window && !speechSynthesis.speaking && !hasAudio) browserSpeak(); }} catch(e){{}}
-    document.removeEventListener('click', once);
-  }}, {{once:false}});
+  // STOP from parent-doc messages (mic, send, tiles, etc.)
+  try {{
+    window.addEventListener('message', function(e) {{ if (e.data && e.data.type === 'JARVIS_STOP_TTS') stopAll() }})
+  }} catch (e) {{}}
 }})();
 </script>
 """
@@ -1940,6 +1968,7 @@ export default function (component) {
   const requireWake = data ? data.requireWake !== false : true
   const lang = (data && data.lang) || 'en-US'
   const G = window.__jarvisHF || (window.__jarvisHF = {})
+  const W = (function () { try { if (window.parent && window.parent.document) return window.parent } catch (e) {} return window })()
   if (!G.rec) {
     const rec = new SR()
     rec.continuous = true
@@ -1956,8 +1985,12 @@ export default function (component) {
     }
     rec.onend = function () {
       G.running = false
-      if (!G.enabled) document.body.classList.remove('jarvis-listening')
-      if (G.enabled) setTimeout(function () { try { rec.start() } catch (e) {} }, 400)
+      if (!G.enabled) { document.body.classList.remove('jarvis-listening'); return }
+      setTimeout(function restart() {
+        if (!G.enabled) return
+        try { if (W.__jarvisSpeaking) { setTimeout(restart, 1200); return } } catch (e) {}
+        try { rec.start() } catch (e) {}
+      }, 400)
     }
     rec.onerror = function (e) {
       G.running = false
@@ -1979,21 +2012,38 @@ export default function (component) {
         const t = ((r[0] && r[0].transcript) || '').trim()
         if (!t) continue
         if (r.isFinal) {
-          let cmd = t
+          var nowMs = Date.now()
+          // Never react to JARVIS's own voice coming back through the phone mic.
+          try {
+            if (W.__jarvisSpeaking || (W.__jarvisSpeechEnd && (nowMs - W.__jarvisSpeechEnd) < 2400)) {
+              statusEl.textContent = '…'
+              continue
+            }
+          } catch (e) {}
+          var cmd = t
           if (requireWake) {
-            const idx = t.toLowerCase().indexOf(wake)
-            if (idx < 0) {
+            var low = t.toLowerCase()
+            var wx = wake.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+            var mm = low.match(new RegExp('^(?:hey\\s+)?' + wx + '\\b[\\s,;:.!?\\-]*'))
+            if (!mm) {
               statusEl.textContent = 'Heard “' + t + '” — say “' + wake + ' …”'
               continue
             }
-            cmd = t.slice(idx + wake.length).trim().replace(/^[\s,\.\!\?:\-]+/, '')
+            cmd = t.slice(mm[0].length).trim().replace(/^[\s,\.\!\?:\-]+/, '')
             if (!cmd) cmd = 'hello'
           }
+          // Ignore a repeated transcript (echo / recognizer restart).
+          if (G.lastCmd === cmd && (nowMs - (G.lastCmdTs || 0)) < 6000) {
+            statusEl.textContent = '…'
+            continue
+          }
+          G.lastCmd = cmd
+          G.lastCmdTs = nowMs
           statusEl.textContent = 'Heard: "' + cmd + '"'
           if (window.__jarvisSFX) window.__jarvisSFX.play('wake')
           // STOP any ongoing TTS when wake word is recognized
           try { if (window.__jarvisTTS && window.__jarvisTTS.bc) window.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
-          try { if (window.parent && window.parent.__jarvisTTS && window.parent.__jarvisTTS.bc) window.parent.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
+          try { if (W.__jarvisTTS && W.__jarvisTTS.bc) W.__jarvisTTS.bc.postMessage('STOP') } catch (x) {}
           setTriggerValue('heard', cmd)
         } else {
           interim = t
@@ -2037,7 +2087,6 @@ export default function (component) {
   const { data, parentElement } = component
   const btn = parentElement.querySelector('#spk')
   const stt = parentElement.querySelector('#tst')
-  const audio = parentElement.querySelector('#spk-audio')
   if (!btn || !stt) return
   const text = (data && data.text) || ''
   const token = (data && data.token) || ''
@@ -2047,7 +2096,38 @@ export default function (component) {
   btn.style.cssText = 'background:rgba(0,212,255,0.10);border:1px solid rgba(0,212,255,0.45);color:#bdf3ff;border-radius:10px;padding:5px 10px;font-size:11px;font-weight:700;'
   stt.style.cssText = 'display:block;color:#8aa4bd;font-size:10px;margin-top:2px;'
   const hasSynth = ('speechSynthesis' in window)
-  if (audio && audioB64) { try { audio.src = 'data:audio/mp3;base64,' + audioB64 } catch (e) {} }
+
+  // Parent window: it survives iframe remounts and Streamlit reconnects.
+  var W = window
+  try { if (window.parent && window.parent.document) W = window.parent } catch (e) {}
+  const G = W.__jarvisTTS || (W.__jarvisTTS = { audio: null, token: '', playing: false, bc: null, timer: null, srcToken: '', startedAt: 0 })
+
+  function noteSpeaking(on) {
+    try { W.__jarvisSpeaking = !!on } catch (e) {}
+    if (!on) { try { W.__jarvisSpeechEnd = Date.now() } catch (e) {} }
+    try { if (G.bc) G.bc.postMessage(on ? 'SPEAKING_START' : 'SPEAKING_END') } catch (e) {}
+  }
+  function keyFor(t) { return 'jv_spoken_' + t }
+  function alreadyPlayed(t) {
+    if (!t) return false
+    try { if (W.sessionStorage && W.sessionStorage.getItem(keyFor(t)) === '1') return true } catch (e) {}
+    try {
+      var ts = parseInt((W.localStorage && W.localStorage.getItem(keyFor(t))) || '0', 10)
+      if (ts && (Date.now() - ts) < 43200000) return true
+    } catch (e) {}
+    return false
+  }
+  function markPlayed(t) {
+    if (!t) return
+    try { if (W.sessionStorage) W.sessionStorage.setItem(keyFor(t), '1') } catch (e) {}
+    try { if (W.localStorage) W.localStorage.setItem(keyFor(t), String(Date.now())) } catch (e) {}
+  }
+  function unmarkPlayed(t) {
+    if (!t) return
+    try { if (W.sessionStorage) W.sessionStorage.removeItem(keyFor(t)) } catch (e) {}
+    try { if (W.localStorage) W.localStorage.removeItem(keyFor(t)) } catch (e) {}
+  }
+  function clearTimer() { try { if (G.timer) { clearTimeout(G.timer); G.timer = null } } catch (e) {} }
   function hideChip() { try { parentElement.style.display = 'none' } catch (e) {} }
   function pickVoice(userLang) {
     const vs = window.speechSynthesis.getVoices() || []
@@ -2065,46 +2145,59 @@ export default function (component) {
       || vs.find(function (v) { return (v.lang || '').indexOf('en') === 0 })
       || null
   }
-  // GLOBAL single player (lives on the parent window so it survives iframe remounts)
-  const W = (function () { try { if (window.parent && window.parent.document) return window.parent } catch (e) {} return window })()
-  const G = W.__jarvisTTS || (W.__jarvisTTS = { audio: null, token: '', playing: false, bc: null, startedAt: 0 })
   function stopAll() {
-    if (G.audio) { try { G.audio.pause(); G.audio.currentTime = 0 } catch (e) {} G.audio = null }
+    clearTimer()
+    if (G.audio) { try { G.audio.pause() } catch (e) {} try { G.audio.currentTime = 0 } catch (e) {} }
     if (hasSynth) { try { window.speechSynthesis.cancel() } catch (e) {} }
     try { if (W !== window && W.speechSynthesis) W.speechSynthesis.cancel() } catch (e) {}
     G.playing = false
     G.token = ''
+    noteSpeaking(false)
   }
-  // BroadcastChannel for cross-iframe STOP signals (mic, send, buttons)
+  // BroadcastChannel for cross-iframe STOP signals (mic, send, tiles, buttons)
   try {
-    if (!G.bc) { G.bc = new W.BroadcastChannel('jarvis_tts'); G.bc.onmessage = function(e){ if(e.data==='STOP') stopAll() } }
+    if (!G.bc) { G.bc = new W.BroadcastChannel('jarvis_tts'); G.bc.onmessage = function (e) { if (e.data === 'STOP') stopAll() } }
   } catch (e) {}
   function broadcastStop() { try { if (G.bc) G.bc.postMessage('STOP') } catch (e) {} }
+  function ensureAudio() {
+    if (G.audio) return G.audio
+    try { if (W !== window && W.Audio) { G.audio = new W.Audio(); G.audio.setAttribute('playsinline', ''); return G.audio } } catch (e) {}
+    return null
+  }
   function playAudio() {
     if (!audioB64) return false
+    const a = ensureAudio()
+    if (!a) return false
     try {
-      stopAll()
-      let target = null
-      try { if (W !== window && W.Audio) { target = new W.Audio(); target.setAttribute('playsinline', '') } } catch (e) {}
-      if (!target) target = audio
-      if (!target) return false
-      G.audio = target
+      if (G.playing && G.token === token) return true
+      clearTimer()
+      try { a.pause() } catch (e) {}
+      if (G.srcToken !== token || !a.src) {
+        a.src = 'data:audio/mp3;base64,' + audioB64
+        G.srcToken = token
+        try { a.load() } catch (e) {}
+      } else {
+        try { a.currentTime = 0 } catch (e) {}
+      }
+      G.audio = a
       G.playing = true
       G.token = token
       G.startedAt = Date.now()
-      target.onplaying = function () { stt.textContent = 'Speaking…'; document.body.classList.add('jarvis-speaking'); hideChip() }
-      target.onended = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking'); stopAll() }
-      target.onerror = function () { document.body.classList.remove('jarvis-speaking'); stopAll(); speak() }
-      try { target.src = 'data:audio/mp3;base64,' + audioB64 } catch (e) {}
-      const p = target.play()
-      if (p && p.catch) { p.catch(function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking'); stopAll() }) }
+      a.onplaying = function () { stt.textContent = 'Speaking…'; document.body.classList.add('jarvis-speaking'); hideChip() }
+      a.onended = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking'); stopAll() }
+      a.onerror = function () { document.body.classList.remove('jarvis-speaking'); unmarkPlayed(token); stopAll(); speak() }
+      markPlayed(token)
+      noteSpeaking(true)
+      const p = a.play()
+      if (p && p.catch) { p.catch(function () { unmarkPlayed(token); stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking'); stopAll() }) }
       return true
-    } catch (e) { return false }
+    } catch (e) { unmarkPlayed(token); return false }
   }
   function speak() {
     if (!text || !hasSynth) return
     try {
-      stopAll()
+      clearTimer()
+      try { if (G.audio) G.audio.pause() } catch (e) {}
       window.speechSynthesis.cancel()
       const u = new SpeechSynthesisUtterance(text)
       u.rate = 0.97
@@ -2118,6 +2211,7 @@ export default function (component) {
         document.body.classList.add('jarvis-speaking')
         if (window.__jarvisSFX) window.__jarvisSFX.play('reply')
         hideChip()
+        noteSpeaking(true)
       }
       u.onboundary = function () {
         document.body.classList.remove('jv-tick')
@@ -2126,33 +2220,44 @@ export default function (component) {
         clearTimeout(window.__jvTick)
         window.__jvTick = setTimeout(function () { document.body.classList.remove('jv-tick') }, 150)
       }
-      u.onend = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking', 'jv-tick'); stopAll() }
-      u.onerror = function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking', 'jv-tick'); stopAll() }
+      u.onend = function () { stt.textContent = ''; document.body.classList.remove('jarvis-speaking', 'jv-tick'); noteSpeaking(false); G.playing = false; G.token = '' }
+      u.onerror = function () { stt.textContent = 'Tap to hear the reply.'; document.body.classList.remove('jarvis-speaking', 'jv-tick'); noteSpeaking(false); G.playing = false; G.token = '' }
       try { if (window.speechSynthesis) { window.speechSynthesis.resume() } } catch (e) {}
       window.speechSynthesis.speak(u)
       G.playing = true
+      G.token = token
+      markPlayed(token)
     } catch (e) {
       stt.textContent = 'Tap to hear the reply.'
-      stopAll()
+      G.playing = false
     }
   }
-  function play() { if (!playAudio()) speak() }
-  btn.onclick = function () { broadcastStop(); play() }
-  try { window.__jarvisTtsPlay = play; window.__jarvisTtsAuto = !!auto; window.__jarvisTtsHasAudio = !!audioB64 } catch (e) {}
-  if (auto && token && window.__jarvisTtsToken !== token) {
-    window.__jarvisTtsToken = token
-    setTimeout(function () { broadcastStop(); play() }, 120)
+  function play(manual) {
+    clearTimer()
+    if (!manual) {
+      if (token && alreadyPlayed(token)) return
+      if (G.playing && G.token === token) return
+    }
+    if (!playAudio()) speak()
   }
-  if (!text) window.__jarvisTtsToken = ''
-  // STOP on any user gesture (send, button, input) - parent doc listens and broadcasts
+  btn.onclick = function () { broadcastStop(); play(true) }
+  try { window.__jarvisTtsPlay = function () { play(true) } } catch (e) {}
+  // Auto-play ONLY a just-generated reply, and only if this tab never played that token.
+  if (auto && token && !alreadyPlayed(token) && !(G.playing && G.token === token)) {
+    G.timer = setTimeout(function () {
+      G.timer = null
+      if (auto && token && alreadyPlayed(token)) return
+      broadcastStop()
+      play(false)
+    }, 120)
+  }
+  // Voice list is read on demand; never auto-replay from voiceschanged or pointerdown.
   try {
-    document.addEventListener('pointerdown', function () { try { if (window.__jarvisTtsHasAudio && audio && audio.paused) { var _p = audio.play(); if (_p && _p.then) _p.then(hideChip).catch(function () {}) } } catch (e) {} }, true)
-    document.addEventListener('click', function () { try { if (window.speechSynthesis) window.speechSynthesis.resume() } catch (e) {} }, true)
-    window.speechSynthesis.onvoiceschanged = function () { try { if (!window.__jarvisTtsHasAudio && window.__jarvisTtsToken && window.__jarvisTtsAuto) { window.__jarvisTtsPlay && window.__jarvisTtsPlay() } } catch (e) {} }
+    document.addEventListener('click', function () { try { if (hasSynth) window.speechSynthesis.resume() } catch (e) {} }, true)
   } catch (e) {}
   // Parent-doc STOP signal listener (from mic, send, tiles, etc.)
   try {
-    window.addEventListener('message', function(e) { if (e.data && e.data.type === 'JARVIS_STOP_TTS') { stopAll() } })
+    window.addEventListener('message', function (e) { if (e.data && e.data.type === 'JARVIS_STOP_TTS') stopAll() })
   } catch (e) {}
 }
 """
@@ -2187,14 +2292,26 @@ def _mobile_tts(text: str, tts_id: str = "") -> None:
     _sel = str(st.session_state.get("stt_lang") or "en-US").strip().lower()
     _lang = speech_lang_for(text, _sel)
     voice = voice_for_lang(_lang, st.session_state.get("voice_gender", "auto"), st.session_state.get("voice_choice"))
+    fresh = bool(tts_id) and st.session_state.get("_tts_fresh") == tts_id
+    if tts_id:
+        # Single-use: this message can auto-play at most once, even across remounts.
+        st.session_state["_tts_fresh"] = ""
     clean = humanize_for_speech(text, limit=700, lang=_lang)
     if not clean:
         return
-    fresh = bool(tts_id) and st.session_state.get("_tts_fresh") == tts_id
-    if fresh:
-        st.session_state["_tts_fresh"] = ""
+    sent = st.session_state.get("_tts_sent")
+    if not isinstance(sent, set):
+        sent = set()
+        st.session_state["_tts_sent"] = sent
+    if fresh and tts_id in sent:
+        fresh = False
     tok = _hl.md5((clean + "|" + voice + "|" + (tts_id or "old")).encode()).hexdigest()
     b64 = _MOBILE_VOICE_CACHE.get(tok, "")
+    if fresh:
+        sent.add(tts_id)
+        if len(sent) > 120:
+            st.session_state["_tts_sent"] = set(list(sent)[-60:])
+        st.session_state["_last_tts_ts"] = time.time()
     if fresh and not b64 and _lang_base(_lang) in _EDGE_BASES:
         try:
             b64 = _b64m.b64encode(synthesize_human_speech(text, voice, "auto", lang=_lang)).decode()
@@ -3068,8 +3185,24 @@ def _mobile_hf_mount() -> None:
         return
     heard = getattr(res, "heard", None)
     if isinstance(heard, str) and heard.strip():
-        st.session_state["_m_last_heard"] = heard.strip()
-        _mobile_send(heard.strip(), source="voice")
+        h = heard.strip()
+        hk = h.lower()
+        now = time.time()
+        # Ignore self-echo: while thinking, right after a spoken reply, or an exact repeat.
+        if st.session_state.get("_mobile_gen"):
+            return
+        if (now - float(st.session_state.get("_last_tts_ts") or 0)) < 2.5:
+            return
+        prev = st.session_state.get("_m_heard_last") or ("", 0.0)
+        try:
+            prev_txt, prev_ts = str(prev[0]), float(prev[1])
+        except Exception:
+            prev_txt, prev_ts = "", 0.0
+        if hk == prev_txt and (now - prev_ts) < 7:
+            return
+        st.session_state["_m_heard_last"] = (hk, now)
+        st.session_state["_m_last_heard"] = h
+        _mobile_send(h, source="voice")
 
 
 def _mobile_page_voice(use_voice) -> None:
@@ -3956,6 +4089,14 @@ def _render_mobile_app() -> None:
     _mobile_sfx(_sfx_event, "thinking" if st.session_state.get("_mobile_gen") else "")
     _mobile_pwa_mount()
     _mobile_clock_mount()
+    # If a fresh reply landed on a page that has no voice widget, speak it here once
+    # (and never leave stale freshness around to replay an old chat later).
+    if page not in ("chat", "voice") and st.session_state.get("_tts_fresh"):
+        _la = next((_m for _m in reversed(st.session_state.get("msgs", [])) if _m.get("role") == "assistant"), None)
+        if _la and _la.get("_tts_id") and _la.get("_tts_id") == st.session_state.get("_tts_fresh"):
+            _mobile_tts(_la.get("content", ""), _la["_tts_id"])
+        else:
+            st.session_state["_tts_fresh"] = ""
     if page == "home":
         _mobile_page_home()
     elif page == "chat":
@@ -4510,8 +4651,8 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
                             _generating.discard(_vk)
                     import threading as _th
                     _th.Thread(target=_bg_gen, daemon=True).start()
-                _speak_token = _hl.md5(((txt or "") + "|" + _say_voice + ("|edge" if b64 else "|browser")).encode()).hexdigest()
-                components.html(voice_html(humanize_for_speech(txt, lang=_say_lang), b64, _say_lang, _speak_token), height=0)
+                _speak_token = _tts_id or _hl.md5(((txt or "") + "|" + _say_voice).encode()).hexdigest()
+                components.html(voice_html(humanize_for_speech(txt, lang=_say_lang), b64, _say_lang, _speak_token, _fresh), height=0)
         if "prompt_input" not in st.session_state: st.session_state.prompt_input = ""
         with st.form("jarvis_form", clear_on_submit=True):
             c1, c2 = st.columns([5, 1])
