@@ -4424,9 +4424,9 @@ def _render_mobile_app() -> None:
         model = DEFAULT
     use_fast = bool(st.session_state.get("fast_toggle", False))
     use_voice = bool(st.session_state.get("use_voice", True))
-    # Default hands-free to ON so the wake overlay works immediately
+    # Hands-free wake: DEFAULT OFF for now (user can enable via Voice page toggle)
     if "_hf_enabled" not in st.session_state:
-        st.session_state["_hf_enabled"] = True
+        st.session_state["_hf_enabled"] = False
     _qp_page = _qp_str("page", "").strip().lower()
     if _qp_page in MOBILE_PAGES and _qp_page != st.session_state.get("_qp_last_page"):
         st.session_state["_qp_last_page"] = _qp_page
