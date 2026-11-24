@@ -1622,7 +1622,7 @@ section[data-testid="stSidebar"]{display:none !important;}
 #   replies use the fastest OpenRouter path for quick, accurate answers.
 # =====================================================================
 
-MOBILE_PAGES = ("home", "chat", "voice", "camera", "media", "tasks", "weather", "system", "models", "memory", "settings")
+MOBILE_PAGES = ("home", "chat", "voice", "camera", "media", "tasks", "weather", "system", "models", "memory", "contacts", "settings")
 
 MOBILE_CSS = """
 <style>
@@ -3263,6 +3263,7 @@ _MOBILE_TILES_HTML = '''<div id="tilegrid" class="m_home_grid" style="visibility
   <button class="mtile" id="tile_system" type="button"><span class="mtile-icon">🖥</span><span class="mtile-title">SYSTEM</span><span class="mtile-sub">Host CPU · RAM · disk</span></button>
   <button class="mtile" id="tile_models" type="button"><span class="mtile-icon">🧠</span><span class="mtile-title">MODELS</span><span id="sub_models" class="mtile-sub">Gemma 4</span></button>
   <button class="mtile" id="tile_memory" type="button"><span class="mtile-icon">🗂</span><span class="mtile-title">MEMORY</span><span id="sub_memory" class="mtile-sub">12 facts learned</span></button>
+  <button class="mtile" id="tile_contacts" type="button"><span class="mtile-icon">📇</span><span class="mtile-title">CONTACTS</span><span class="mtile-sub">Call · WhatsApp · SMS</span></button>
   <button class="mtile" id="tile_settings" type="button"><span class="mtile-icon">⚙</span><span class="mtile-title">SETTINGS</span><span class="mtile-sub">Voice · sounds · key</span></button>
   <button class="mtile" id="tile_voice" type="button"><span class="mtile-icon">🎙</span><span class="mtile-title">TAP-TO-TALK</span><span class="mtile-sub">Fallback voice page</span></button>
 </div>
@@ -3370,8 +3371,10 @@ def _mobile_page_home() -> None:
             _mobile_mcard(c1, "🧠", "Models", LABELS.get(st.session_state.get("model_sel", DEFAULT), "")[:24], "models", "models")
             _mobile_mcard(c2, "🗂", "Memory", f"{facts} facts learned", "memory", "memory")
             c1, c2 = st.columns(2)
-            _mobile_mcard(c1, "⚙", "Settings", "Voice · sounds · key", "settings", "settings")
-            _mobile_mcard(c2, "🎙", "Tap-to-talk", "Fallback voice page", "voice", "voice")
+            _mobile_mcard(c1, "📇", "Contacts", "Call · WhatsApp · SMS", "contacts", "contacts")
+            _mobile_mcard(c2, "⚙", "Settings", "Voice · sounds · key", "settings", "settings")
+            c1, c2 = st.columns(2)
+            _mobile_mcard(c1, "🎙", "Tap-to-talk", "Fallback voice page", "voice", "voice")
     if st.session_state.get("msgs"):
         last = next((m.get("content", "") for m in reversed(st.session_state["msgs"]) if m.get("role") == "assistant"), "")
         if last:
@@ -3849,6 +3852,108 @@ def _mobile_page_memory() -> None:
         st.rerun()
 
 
+def _mobile_page_contacts() -> None:
+    """Contacts manager: Google CSV import, add/edit, fuzzy-name tester."""
+    _mobile_top("Contacts", "contacts")
+    try:
+        import contacts_engine as ce
+    except Exception as e:
+        st.error(f"Contacts engine unavailable: {e}")
+        return
+
+    store = ce.load_store()
+    total = len(store.get("contacts", []))
+    st.caption(f"{total} contact{'s' if total != 1 else ''} · fuzzy names on (moms→mom, sireesha≈shireesha)")
+
+    t_add, t_import, t_manage = st.tabs(["Add", "Import", "Manage"])
+
+    with t_add:
+        st.markdown("##### New contact")
+        c_name = st.text_input("Name", placeholder="Shireesha", key="mc_name")
+        c_rel = st.selectbox(
+            "Relationship (optional)",
+            ["", "mother", "father", "aunty", "uncle", "sister", "brother",
+             "wife", "husband", "son", "daughter", "friend", "boss", "doctor"],
+            key="mc_rel",
+        )
+        c_alias = st.text_input("Aliases (comma separated)", placeholder="sireesha, siri", key="mc_alias")
+        c_phone = st.text_input("Phone", placeholder="+91 98765 43210", key="mc_phone")
+        c_wa = st.text_input("WhatsApp number (if different)", placeholder="", key="mc_wa")
+        c_email = st.text_input("Email", placeholder="name@example.com", key="mc_email")
+        if st.button("Save contact", key="mc_save", width="stretch", type="primary"):
+            if not (c_name or c_phone or c_email):
+                st.warning("Add at least a name, phone or email.")
+            else:
+                saved = ce.upsert_contact({
+                    "name": c_name or (c_phone or c_email),
+                    "relationship": c_rel,
+                    "aliases": c_alias,
+                    "phone": c_phone,
+                    "whatsapp": c_wa,
+                    "email": c_email,
+                })
+                st.success(f"Saved {saved.get('name')}.")
+                st.rerun()
+
+    with t_import:
+        st.markdown("##### Import Google Contacts")
+        st.caption("contacts.google.com → Export → Google CSV → upload here.")
+        up = st.file_uploader("Google CSV", type=["csv"], key="mc_csv")
+        if up is not None and st.button("Import CSV", key="mc_import_btn", width="stretch", type="primary"):
+            res = ce.import_google_csv(up)
+            if res.get("error"):
+                st.error(res["error"])
+            else:
+                st.success(f"Added {res['added']} · updated {res['updated']} · skipped {res['skipped']}")
+                st.rerun()
+
+    with t_manage:
+        st.markdown("##### Test a spoken name")
+        q = st.text_input("Say / type a name", placeholder="moms, aunts, sireesha…", key="mc_test_q")
+        if q:
+            r = ce.resolve(q)
+            c = r.get("contact")
+            if not c:
+                st.warning(f"No match for “{q}”. Add them below or in the Add tab.")
+            elif r.get("ambiguous"):
+                cands = ", ".join(ce.describe(x) for x in r.get("candidates", [])[:3])
+                st.info(f"Ambiguous ({int(r['confidence'] * 100)}%) — candidates: {cands}")
+            else:
+                st.success(f"→ {ce.describe(c)} · confidence {int(r['confidence'] * 100)}% · {r['method']}")
+                if st.button(f"That's right — remember “{q}”", key="mc_learn_btn", width="stretch"):
+                    ce.learn_alias(q, c["id"])
+                    st.success("Learned.")
+                    st.rerun()
+
+        st.markdown("##### Saved contacts")
+        contacts = ce.list_contacts()
+        if not contacts:
+            st.caption("No contacts yet — use Add or Import.")
+        for c in contacts[:80]:
+            title = f"{c.get('name') or 'Unnamed'}" + (f" · {c['relationship']}" if c.get("relationship") else "")
+            with st.expander(title, expanded=False):
+                e_name = st.text_input("Name", value=c.get("name") or "", key=f"ce_name_{c['id']}")
+                e_rel = st.text_input("Relationship", value=c.get("relationship") or "", key=f"ce_rel_{c['id']}")
+                e_alias = st.text_input("Aliases", value=", ".join(c.get("aliases") or []), key=f"ce_alias_{c['id']}")
+                e_phone = st.text_input("Phone", value=c.get("phone") or "", key=f"ce_phone_{c['id']}")
+                e_wa = st.text_input("WhatsApp", value=c.get("whatsapp") or "", key=f"ce_wa_{c['id']}")
+                e_email = st.text_input("Email", value=c.get("email") or "", key=f"ce_email_{c['id']}")
+                b1, b2 = st.columns(2)
+                with b1:
+                    if st.button("Save", key=f"ce_save_{c['id']}", width="stretch"):
+                        ce.upsert_contact({
+                            "name": e_name, "relationship": e_rel, "aliases": e_alias,
+                            "phone": e_phone, "whatsapp": e_wa, "email": e_email,
+                        }, contact_id=c["id"])
+                        st.success("Saved.")
+                        st.rerun()
+                with b2:
+                    if st.button("Delete", key=f"ce_del_{c['id']}", width="stretch"):
+                        ce.delete_contact(c["id"])
+                        st.warning("Deleted.")
+                        st.rerun()
+
+
 def _mobile_page_settings(api_key: str) -> None:
     global _JARVIS_API_KEY
     _mobile_top("Settings", "settings")
@@ -3888,6 +3993,72 @@ def _mobile_page_settings(api_key: str) -> None:
         pass
     if st.button("Open tap-to-talk fallback", key="m_open_voice", width="stretch", on_click=_mobile_nav, args=("voice",)):
         pass
+    st.markdown("#### Email (send + read)")
+    with st.expander("Gmail / SMTP + IMAP", expanded=False):
+        try:
+            import automation_engine as _ae
+            _ic = _ae.load_integrations()
+        except Exception:
+            _ae, _ic = None, {}
+        _smtp_saved = _ic.get("smtp", {}) if isinstance(_ic, dict) else {}
+        _imap_saved = _ic.get("imap", {}) if isinstance(_ic, dict) else {}
+        e_user = st.text_input("Email address", value=_smtp_saved.get("user") or os.getenv("SMTP_USER", ""),
+                               placeholder="you@gmail.com", key="m_smtp_user")
+        e_pass = st.text_input("App password", type="password", value=_smtp_saved.get("password") or "",
+                               key="m_smtp_pass")
+        e_host = st.text_input("SMTP host", value=_smtp_saved.get("host") or "smtp.gmail.com", key="m_smtp_host")
+        e_port = st.number_input("SMTP port", value=int(_smtp_saved.get("port") or 587), key="m_smtp_port")
+        i_host = st.text_input("IMAP host", value=_imap_saved.get("host") or "imap.gmail.com", key="m_imap_host")
+        i_port = st.number_input("IMAP port", value=int(_imap_saved.get("port") or 993), key="m_imap_port")
+        st.caption("Gmail: enable 2-step verification → create an App password (Google Account → Security).")
+        if st.button("Save email settings", key="m_email_save", width="stretch"):
+            if _ae is not None:
+                _ae.save_integrations({
+                    "smtp": {"host": e_host, "port": int(e_port), "user": e_user,
+                             "password": e_pass, "from_email": e_user},
+                    "imap": {"host": i_host, "port": int(i_port), "user": e_user, "password": e_pass},
+                })
+                st.success("Saved.")
+                st.rerun()
+        if st.button("Test inbox", key="m_email_test", width="stretch"):
+            if _ae is not None:
+                _r = _ae.check_email(limit=3)
+                if _r.get("ok"):
+                    st.success(f"{_r.get('unread', 0)} unread")
+                    for _it in _r.get("items", []):
+                        st.caption(f"• {_it['from']} — {_it['subject']}")
+                else:
+                    st.error(_r.get("error") or "Could not read inbox")
+
+    st.markdown("#### Phone Bridge (Termux)")
+    with st.expander("Hands-free calls · SMS · WhatsApp", expanded=False):
+        try:
+            import automation_engine as _ae2
+            _pb_saved = (_ae2.load_integrations().get("phone_bridge", {}) or {})
+        except Exception:
+            _ae2, _pb_saved = None, {}
+        b_url = st.text_input("Bridge URL", value=_pb_saved.get("url") or os.getenv("PHONE_BRIDGE_URL", ""),
+                              placeholder="http://192.168.1.5:8765", key="m_pb_url")
+        b_tok = st.text_input("Bridge token", type="password", value=_pb_saved.get("token") or "",
+                              key="m_pb_token")
+        if st.button("Save bridge", key="m_pb_save", width="stretch"):
+            if _ae2 is not None:
+                _ae2.save_integrations({"phone_bridge": {"url": b_url, "token": b_tok}})
+                st.success("Saved.")
+                st.rerun()
+        if st.button("Test connection", key="m_pb_test", width="stretch"):
+            if _ae2 is not None:
+                _pr = _ae2.bridge_ping()
+                if _pr.get("ok"):
+                    st.success(f"Connected — {_pr.get('device', 'phone')}")
+                    _ph = _ae2.bridge_health()
+                    _missing = [k for k, v in (_ph.get("tools") or {}).items() if not v]
+                    if _missing:
+                        st.warning("Missing Termux:API commands: " + ", ".join(_missing))
+                else:
+                    st.error(_pr.get("error") or "No response from bridge")
+        st.caption("Run phone_bridge.py inside Termux. Full setup: SETUP_PHONE_BRIDGE.md")
+
     st.markdown("#### Personal memory")
     _up = load_user_profile()
     _uname = st.text_input("Your name", value=_up.get("name") or "", placeholder="e.g. Alex", key="m_user_name")
@@ -4099,18 +4270,14 @@ def _mobile_try_intent(prompt: str):
         except Exception:
             return ("reply", "Could not run that command.")
 
-    # --- Phase 2/3 Automation via AutomationEngine ---
+    # --- Phases 1-3 Automation via AutomationEngine (contacts/calls/SMS/WhatsApp/email) ---
     try:
         import automation_engine as ae
         result = ae.dispatch_command(prompt)
-        if result.get("success"):
-            msg = result.get("message", "Done")
-            if result.get("should_speak", True):
-                return ("reply", msg)
-            # should_speak=False means just show it (no TTS)
-            st.session_state["msgs"].append({"role": "assistant", "content": msg, "_tts_id": _new_tts_id()})
-            st.session_state["_tts_fresh"] = st.session_state["msgs"][-1]["_tts_id"]
-            return ("nav", None)
+        if result.get("success") or (result.get("intent") and result.get("message")):
+            # Respect should_speak=False (e.g. search results are shown, not read aloud).
+            st.session_state["_mobile_speak_next"] = bool(result.get("should_speak", True))
+            return ("reply", result.get("message", "Done"))
     except Exception:
         pass
 
@@ -4364,8 +4531,9 @@ def _mobile_generate_pending(api_key, model, use_fast) -> None:
         reply, err, nav_to = _mobile_answer(api_key, model, use_fast, prompt)
     except Exception as e:
         reply, err = "", f"Mobile reply error: {e}"
+    _speak = bool(st.session_state.pop("_mobile_speak_next", True))
     _amsg = {"role": "assistant", "content": (reply if not err else f"⚠️ {err}")}
-    if reply and not err:
+    if reply and not err and _speak:
         _amsg["_tts_id"] = _new_tts_id()
         st.session_state["_tts_fresh"] = _amsg["_tts_id"]
     st.session_state.msgs.append(_amsg)
@@ -4491,6 +4659,8 @@ def _render_mobile_app() -> None:
         _mobile_page_models()
     elif page == "memory":
         _mobile_page_memory()
+    elif page == "contacts":
+        _mobile_page_contacts()
     elif page == "settings":
         _mobile_page_settings(api_key)
     _mobile_generate_pending(api_key, model, use_fast)
@@ -4618,6 +4788,146 @@ def main():
         )[1]
         voice_gender = st.select_slider("Voice gender", options=["Auto", "Male", "Female"], key="voice_gender")
         st.caption("Native neural voice for your speech language: Telugu (Shruti/Mohan), Hindi (Swara/Madhur), Kannada (Sapna/Gagan), English (your selected voice). Human pacing, natural pauses and breathing — not a device/robotic voice.")
+        st.markdown("---")
+        st.markdown("### 📇 Contacts, Calls & Messages")
+        _dc_tabs = st.tabs(["Contacts", "Email", "Phone Bridge"])
+        with _dc_tabs[0]:
+            try:
+                import contacts_engine as _dce
+                _dc_list = _dce.list_contacts()
+            except Exception as _dce_err:
+                _dce, _dc_list = None, []
+                st.error(f"Contacts engine unavailable: {_dce_err}")
+            st.caption(f"{len(_dc_list)} contacts · fuzzy names on (moms→mom, aunts→aunty, sireesha≈shireesha)")
+            _dc_up = st.file_uploader("Import Google Contacts CSV", type=["csv"], key="dc_csv")
+            if _dc_up is not None and st.button("Import CSV", key="dc_import", use_container_width=True):
+                if _dce:
+                    _dc_res = _dce.import_google_csv(_dc_up)
+                    if _dc_res.get("error"):
+                        st.error(_dc_res["error"])
+                    else:
+                        st.success(f"Added {_dc_res['added']} · updated {_dc_res['updated']} · skipped {_dc_res['skipped']}")
+                        st.rerun()
+            with st.expander("Add a contact", expanded=False):
+                _dc_c1, _dc_c2, _dc_c3 = st.columns(3)
+                _dc_name = _dc_c1.text_input("Name", key="dc_name")
+                _dc_rel = _dc_c2.selectbox(
+                    "Relationship", ["", "mother", "father", "aunty", "uncle", "sister", "brother",
+                                     "wife", "husband", "son", "daughter", "friend", "boss", "doctor"],
+                    key="dc_rel")
+                _dc_phone = _dc_c3.text_input("Phone", key="dc_phone")
+                _dc_c4, _dc_c5, _dc_c6 = st.columns(3)
+                _dc_alias = _dc_c4.text_input("Aliases (comma separated)", key="dc_alias")
+                _dc_wa = _dc_c5.text_input("WhatsApp (if different)", key="dc_wa")
+                _dc_email = _dc_c6.text_input("Email", key="dc_email")
+                if st.button("Save contact", key="dc_save", use_container_width=True):
+                    if _dce:
+                        _dc_saved = _dce.upsert_contact({
+                            "name": _dc_name or _dc_phone or _dc_email, "relationship": _dc_rel,
+                            "aliases": _dc_alias, "phone": _dc_phone, "whatsapp": _dc_wa,
+                            "email": _dc_email,
+                        })
+                        st.success(f"Saved {_dc_saved.get('name')}.")
+                        st.rerun()
+            _dc_q = st.text_input("Test a spoken name", placeholder="moms, aunts, sireesha…", key="dc_test_q")
+            if _dc_q and _dce:
+                _dc_r = _dce.resolve(_dc_q)
+                _dc_c = _dc_r.get("contact")
+                if not _dc_c:
+                    st.warning(f"No match for “{_dc_q}”.")
+                elif _dc_r.get("ambiguous"):
+                    st.info("Ambiguous — " + ", ".join(_dce.describe(x) for x in _dc_r.get("candidates", [])[:3]))
+                else:
+                    st.success(f"→ {_dce.describe(_dc_c)} · {int(_dc_r['confidence'] * 100)}% · {_dc_r['method']}")
+            for _dc_contact in _dc_list[:40]:
+                _dc_title = (_dc_contact.get("name") or "Unnamed") + (
+                    f" · {_dc_contact['relationship']}" if _dc_contact.get("relationship") else "")
+                with st.expander(_dc_title, expanded=False):
+                    _e1, _e2, _e3 = st.columns(3)
+                    _n = _e1.text_input("Name", value=_dc_contact.get("name") or "", key=f"dce_n_{_dc_contact['id']}")
+                    _r = _e2.text_input("Relationship", value=_dc_contact.get("relationship") or "", key=f"dce_r_{_dc_contact['id']}")
+                    _a = _e3.text_input("Aliases", value=", ".join(_dc_contact.get("aliases") or []), key=f"dce_a_{_dc_contact['id']}")
+                    _p1, _p2, _p3 = st.columns(3)
+                    _ph = _p1.text_input("Phone", value=_dc_contact.get("phone") or "", key=f"dce_p_{_dc_contact['id']}")
+                    _wa = _p2.text_input("WhatsApp", value=_dc_contact.get("whatsapp") or "", key=f"dce_w_{_dc_contact['id']}")
+                    _em = _p3.text_input("Email", value=_dc_contact.get("email") or "", key=f"dce_e_{_dc_contact['id']}")
+                    _b1, _b2 = st.columns(2)
+                    if _b1.button("Save", key=f"dce_save_{_dc_contact['id']}", use_container_width=True):
+                        if _dce:
+                            _dce.upsert_contact({"name": _n, "relationship": _r, "aliases": _a,
+                                                 "phone": _ph, "whatsapp": _wa, "email": _em},
+                                                contact_id=_dc_contact["id"])
+                            st.success("Saved.")
+                            st.rerun()
+                    if _b2.button("Delete", key=f"dce_del_{_dc_contact['id']}", use_container_width=True):
+                        if _dce:
+                            _dce.delete_contact(_dc_contact["id"])
+                            st.warning("Deleted.")
+                            st.rerun()
+        with _dc_tabs[1]:
+            try:
+                import automation_engine as _dae
+                _dci = _dae.load_integrations()
+            except Exception as _dae_err:
+                _dae, _dci = None, {}
+                st.error(f"Automation engine unavailable: {_dae_err}")
+            _ds = _dci.get("smtp", {}) if isinstance(_dci, dict) else {}
+            _di = _dci.get("imap", {}) if isinstance(_dci, dict) else {}
+            _ec1, _ec2 = st.columns(2)
+            _eu = _ec1.text_input("Email address", value=_ds.get("user") or os.getenv("SMTP_USER", ""), key="dce_user")
+            _ep = _ec2.text_input("App password", type="password", value=_ds.get("password") or "", key="dce_pass")
+            _eh1, _eh2, _eh3, _eh4 = st.columns(4)
+            _eh = _eh1.text_input("SMTP host", value=_ds.get("host") or "smtp.gmail.com", key="dce_smtp_host")
+            _epn = _eh2.number_input("SMTP port", value=int(_ds.get("port") or 587), key="dce_smtp_port")
+            _ih = _eh3.text_input("IMAP host", value=_di.get("host") or "imap.gmail.com", key="dce_imap_host")
+            _ipn = _eh4.number_input("IMAP port", value=int(_di.get("port") or 993), key="dce_imap_port")
+            st.caption("Gmail: enable 2-step verification → App passwords. JARVIS stores these in data/integrations.json (git-ignored).")
+            if st.button("Save email settings", key="dce_save_email", use_container_width=True):
+                if _dae:
+                    _dae.save_integrations({
+                        "smtp": {"host": _eh, "port": int(_epn), "user": _eu, "password": _ep, "from_email": _eu},
+                        "imap": {"host": _ih, "port": int(_ipn), "user": _eu, "password": _ep},
+                    })
+                    st.success("Saved.")
+                    st.rerun()
+            if st.button("Test inbox", key="dce_test_email", use_container_width=True):
+                if _dae:
+                    _tr = _dae.check_email(limit=3)
+                    if _tr.get("ok"):
+                        st.success(f"{_tr.get('unread', 0)} unread")
+                        for _ti in _tr.get("items", []):
+                            st.caption(f"• {_ti['from']} — {_ti['subject']}")
+                    else:
+                        st.error(_tr.get("error") or "Could not read inbox")
+        with _dc_tabs[2]:
+            try:
+                import automation_engine as _dae2
+                _dpb = _dae2.load_integrations().get("phone_bridge", {}) or {}
+            except Exception:
+                _dae2, _dpb = None, {}
+            _bp1, _bp2 = st.columns([2, 1])
+            _burl = _bp1.text_input("Bridge URL", value=_dpb.get("url") or os.getenv("PHONE_BRIDGE_URL", ""),
+                                    placeholder="http://192.168.1.5:8765", key="dc_bridge_url")
+            _btok = _bp2.text_input("Bridge token", type="password", value=_dpb.get("token") or "", key="dc_bridge_token")
+            _bb1, _bb2 = st.columns(2)
+            if _bb1.button("Save bridge", key="dc_bridge_save", use_container_width=True):
+                if _dae2:
+                    _dae2.save_integrations({"phone_bridge": {"url": _burl, "token": _btok}})
+                    st.success("Saved.")
+                    st.rerun()
+            if _bb2.button("Test connection", key="dc_bridge_test", use_container_width=True):
+                if _dae2:
+                    _pr = _dae2.bridge_ping()
+                    if _pr.get("ok"):
+                        st.success(f"Connected — {_pr.get('device', 'phone')}")
+                        _ph = _dae2.bridge_health()
+                        _missing = [k for k, v in (_ph.get("tools") or {}).items() if not v]
+                        if _missing:
+                            st.warning("Missing Termux:API commands: " + ", ".join(_missing))
+                    else:
+                        st.error(_pr.get("error") or "No response from bridge")
+            st.caption("Setup guide: SETUP_PHONE_BRIDGE.md — install Termux + Termux:API (F-Droid), run phone_bridge.py, then paste the printed URL + token here.")
+        st.markdown("---")
         if st.button("Close Settings"):
             st.session_state.active_tab = "Home"; st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
@@ -5096,14 +5406,16 @@ body{{margin:0;background:transparent;font-family:system-ui,sans-serif;}}
         st.session_state.jarvis_prompt = _voice_cmd
         st.session_state["_voice_dispatch"] = True
 
-    # --- Desktop automation dispatch (Phase 2/3) ---
-    if st.session_state.msgs:
-        _last_user = next((m["content"] for m in reversed(st.session_state.msgs) if m.get("role") == "user"), "")
+    # --- Desktop automation dispatch (Phases 1-3: contacts/calls/SMS/WhatsApp/email) ---
+    # Only when the LAST message is an unanswered user message — prevents re-running
+    # the same command on every rerun.
+    if st.session_state.msgs and st.session_state.msgs[-1].get("role") == "user":
+        _last_user = st.session_state.msgs[-1].get("content", "") or ""
         if _last_user.strip():
             try:
                 import automation_engine as ae
                 _ar = ae.dispatch_command(_last_user.strip())
-                if _ar.get("success"):
+                if _ar.get("success") or (_ar.get("intent") and _ar.get("message")):
                     _amsg = {"role": "assistant", "content": _ar.get("message", "Done")}
                     if _ar.get("should_speak", True):
                         _amsg["_tts_id"] = _new_tts_id()

@@ -17,6 +17,7 @@ owner_voice.json
 .streamlit/secrets.toml
 
 # private / runtime data (never deploy)
+data/
 jarvis_memory.db
 jarvis_web_cache.db
 memory_media/
