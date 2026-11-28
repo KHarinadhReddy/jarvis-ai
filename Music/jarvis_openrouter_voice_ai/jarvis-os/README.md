@@ -114,6 +114,40 @@ The debug defaults are `http://127.0.0.1:8000` and `jarvis-dev-token`. The relea
 
 ---
 
+## Updating the app on your phone (no laptop needed)
+
+There is a GitHub Actions workflow that builds the debug APK and publishes it to this repository's GitHub Releases page.
+
+- The workflow runs automatically on every push to `main`, or you can trigger it manually via **Actions → Build J.A.R.V.I.S APK → Run workflow**.
+- Each run attaches `jarvis-os/android/app/build/outputs/apk/debug/app-debug.apk` to a GitHub Release.
+
+### Update from the phone (recommended path)
+
+1. On the phone, allow installing unknown apps for your browser:
+   `Settings → Apps → Special app access → Install unknown apps → Chrome (or your browser) → Allow`.
+2. Open the GitHub repository's **Releases** page in the phone browser.
+3. Download the latest `app-debug.apk`.
+4. Tap the downloaded file and install.
+
+That's it — no laptop, no ADB, no rebuild on your machine.
+
+### Update from the laptop (existing path)
+
+```powershell
+cd jarvis-os/android
+$env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'
+.\gradlew.bat :app:assembleDebug --no-daemon --console=plain
+adb install -r app\build\outputs\apk\debug\app-debug.apk
+```
+
+One-click variant:
+
+```powershell
+.\jarvis-os\android\install_update.bat
+```
+
+---
+
 ## AI providers and models
 
 The backend selects the first configured provider:
