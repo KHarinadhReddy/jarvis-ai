@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">J.A.R.V.I.S.</string>
+    <string name="accessibility_service_label">J.A.R.V.I.S. Device Control</string>
+    <string name="accessibility_service_description">Allows J.A.R.V.I.S. to perform approved global actions and gestures such as Home, Back, Recents, and scrolling. It never reads password fields and only acts after your request.</string>
+</resources>
