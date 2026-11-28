@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: jarvis-ai-backend
+    runtime: python
+    rootDir: Music/jarvis_openrouter_voice_ai/jarvis-os/backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    plan: free
+    healthCheckPath: /v1/health
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: OPENROUTER_MODEL
+        value: nvidia/nemotron-3.5-super-vl:free
+      - key: DEEPSEEK_MODEL
+        value: deepseek-flash
+      - key: DEVICE_TOKEN
+        sync: false
+      - key: ALLOW_MOCK
+        value: "false"
+      - key: ALLOWED_ORIGINS
+        value: ""
