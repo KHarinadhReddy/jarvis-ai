@@ -116,18 +116,31 @@ The debug defaults are `http://127.0.0.1:8000` and `jarvis-dev-token`. The relea
 
 ## Updating the app on your phone (no laptop needed)
 
-There is a GitHub Actions workflow that builds the debug APK and publishes it to this repository's GitHub Releases page.
+There is a GitHub Actions workflow that builds the debug APK and publishes it to this repository's GitHub Releases page, tagged `v0.1.0`.
 
 - The workflow runs automatically on every push to `main`, or you can trigger it manually via **Actions → Build J.A.R.V.I.S APK → Run workflow**.
-- Each run attaches `jarvis-os/android/app/build/outputs/apk/debug/app-debug.apk` to a GitHub Release.
+- Each run attaches `jarvis-os/android/app/build/outputs/apk/debug/app-debug.apk` to the release `v0.1.0`.
+
+### 🚀 Direct download link (open this on the phone — it downloads the APK)
+
+Once release `v0.1.0` exists, use this single link in the phone browser. Opening it downloads the APK directly:
+
+```
+https://github.com/KHarinadhReddy/jarvis-ai/releases/latest/download/app-debug.apk
+```
+
+or pinned to the release:
+
+```
+https://github.com/KHarinadhReddy/jarvis-ai/releases/download/v0.1.0/app-debug.apk
+```
 
 ### Update from the phone (recommended path)
 
 1. On the phone, allow installing unknown apps for your browser:
    `Settings → Apps → Special app access → Install unknown apps → Chrome (or your browser) → Allow`.
-2. Open the GitHub repository's **Releases** page in the phone browser.
-3. Download the latest `app-debug.apk`.
-4. Tap the downloaded file and install.
+2. Open the direct download link above in the phone browser.
+3. The APK downloads → tap the downloaded file → install.
 
 That's it — no laptop, no ADB, no rebuild on your machine.
 

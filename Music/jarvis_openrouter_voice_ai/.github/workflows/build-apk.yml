@@ -41,5 +41,7 @@ jobs:
       - name: Publish APK to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v0.1.0
+          name: J.A.R.V.I.S. Mobile v0.1.0
           files: jarvis-os/android/app/build/outputs/apk/debug/app-debug.apk
           generate_release_notes: true
