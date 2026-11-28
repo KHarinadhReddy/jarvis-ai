@@ -48,6 +48,7 @@ data class HealthInfo(
     val version: String = "",
     val provider: String = "",
     val model: String = "",
+    val models: List<String> = emptyList(),
     val vision: Boolean = false,
     val tts: String = "",
     val telugu_tts: Boolean = false,

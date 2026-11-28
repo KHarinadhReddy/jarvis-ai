@@ -26,6 +26,7 @@ data class BackendState(
     val configured: Boolean = false,
     val provider: String = "",
     val model: String = "",
+    val models: List<String> = emptyList(),
     val message: String = "Not checked yet",
 )
 
@@ -96,6 +97,7 @@ class DashboardViewModel(private val app: JarvisApp) : ViewModel() {
                     configured = health.configured,
                     provider = health.provider,
                     model = health.model,
+                    models = health.models,
                     message = if (health.configured) "AI online" else "Backend online; no AI key configured",
                 )
             } catch (error: ApiException) {

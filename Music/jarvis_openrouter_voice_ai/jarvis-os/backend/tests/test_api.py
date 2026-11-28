@@ -27,6 +27,16 @@ def test_health_is_public():
     assert body["tts"] == "edge-neural"
 
 
+def test_models_returns_more_than_three_models():
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    body = response.json()
+    models = body.get("models") or []
+    assert isinstance(models, list)
+    assert len(models) > 3
+    assert body["default"]
+
+
 def test_chat_requires_token():
     response = client.post("/v1/chat/stream", json={"messages": [{"role": "user", "content": "hi"}]})
     assert response.status_code == 401

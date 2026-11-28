@@ -24,6 +24,15 @@ class Settings(BaseSettings):
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_model: str = "deepseek/deepseek-v4.1-flash"
 
+    # More than three selectable AI models. The default is first; the rest are
+    # exposed through /v1/models and can be requested per call via the `model` field.
+    openrouter_models: list[str] = [
+        "nvidia/nemotron-3.5-super-vl:free",
+        "deepseek/deepseek-v4.1-flash",
+        "google/gemini-2.5-flash",
+        "meta-llama/llama-3.3-70b-instruct",
+    ]
+
     device_token: str = "jarvis-dev-token"
     allowed_origins: str = ""
 
@@ -52,6 +61,11 @@ class Settings(BaseSettings):
         if self.openrouter_api_key:
             return self.openrouter_model
         return ""
+
+    @property
+    def models(self) -> list[str]:
+        """Selectable AI models (>3). The first entry is the default."""
+        return list(self.openrouter_models)
 
 
 @lru_cache

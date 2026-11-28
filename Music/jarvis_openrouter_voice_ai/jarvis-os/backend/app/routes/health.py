@@ -44,6 +44,7 @@ async def models(
     return {
         "provider": provider.name,
         "default": provider.model,
+        "models": settings.models,
         "deepseek": settings.deepseek_model,
         "openrouter": settings.openrouter_model,
         "note": "Model selection is configured on the server; the app never holds an AI key.",

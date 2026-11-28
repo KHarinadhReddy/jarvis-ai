@@ -416,15 +416,32 @@ fun DashboardScreen(
             }
         } else if (online == true) {
             Spacer(Modifier.height(12.dp))
+            val modelLine = if (backend.configured) {
+                if (backend.models.size > 1) {
+                    "${backend.provider} • ${backend.model} • ${backend.models.size} models"
+                } else {
+                    "${backend.provider} • ${backend.model}"
+                }
+            } else {
+                "NO AI KEY"
+            }
             Pill(
-                if (backend.configured) "${backend.provider} • ${backend.model}" else "NO AI KEY",
+                modelLine,
                 if (backend.configured) Cyan else Amber,
                 modifier = Modifier.fillMaxWidth(),
                 maxLines = 2,
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                if (backend.configured) "AI link ready" else "Add a key on the server",
+                if (backend.configured) {
+                    if (backend.models.size > 1) {
+                        "AI link ready • ${backend.models.joinToString(", ")}"
+                    } else {
+                        "AI link ready"
+                    }
+                } else {
+                    "Add a key on the server"
+                },
                 style = MaterialTheme.typography.labelSmall,
                 color = TextMuted,
                 maxLines = 1,
